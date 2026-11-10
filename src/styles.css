@@ -114,3 +114,19 @@ input, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--borde
 .rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); animation: blink 1s infinite; }
 .rec-time { flex: 1; font-variant-numeric: tabular-nums; }
 @keyframes blink { 50% { opacity: .3; } }
+
+/* ---------- ชาเนล / ติดตั้งแอป / แจ้งเตือน (เฟส 3) ---------- */
+.setup-card { margin: 10px 12px; padding: 12px; border-radius: 12px; background: var(--blue-soft); display: flex; flex-direction: column; gap: 10px; }
+.setup-card p { margin: 0; }
+.setup-step { display: flex; flex-direction: column; gap: 6px; }
+.ios-guide .guide-steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 12px; }
+.share-icon { display: inline-block; border: 1px solid var(--blue); color: var(--blue); border-radius: 6px; padding: 0 5px; }
+.guide-arrow { text-align: center; font-size: 40px; color: var(--blue); animation: bounce 1s infinite; }
+@keyframes bounce { 50% { transform: translateY(8px); } }
+.section-title { font-size: 15px; margin: 14px 14px 4px; }
+.card-like { border-bottom: 1px solid var(--border); }
+.radio { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; }
+.radio input { width: auto; margin-top: 4px; }
+.plain-link { color: inherit; text-decoration: none; }
+.readonly-note { padding: 12px; text-align: center; color: var(--muted); font-size: 14px; border-top: 1px solid var(--border); background: #fff; }
+.push-right { margin-left: auto; }

@@ -49,6 +49,7 @@ export type ClientFrame =
   | { type: 'send'; clientId: string; body: string; kind?: 'text' | FileKind; fileId?: string }
   | { type: 'sync'; afterSeq: number }
   | { type: 'read'; seq: number }
+  | { type: 'presence'; visible: boolean } // เฟส 3: หน้าจอห้องนี้เปิดอยู่ไหม (เปิดอยู่ = ไม่ส่งแจ้งเตือน)
   | { type: 'ping' };
 
 // ---------- ห้อง → หน้าเว็บ ----------

@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0002_files.sql
+-- ล่าสุดถึง: 0003_channels_push.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -40,8 +40,11 @@ CREATE TABLE rooms (
   last_seq              INTEGER NOT NULL DEFAULT 0,
   last_message_at       TEXT,
   last_message_preview  TEXT,
-  last_sender_name      TEXT
+  last_sender_name      TEXT,
+  visibility            TEXT CHECK (visibility IN ('public', 'private')),  -- 0003: ชาเนลสาธารณะ/ส่วนตัว (ห้องอื่น NULL)
+  description           TEXT                                               -- 0003: คำอธิบายชาเนล
 );
+CREATE INDEX idx_rooms_type_visibility ON rooms(type, visibility);
 
 -- ---------- สมาชิกห้อง ----------
 -- last_read_seq: อ่านถึงข้อความลำดับที่เท่าไรแล้ว (ยังไม่อ่าน = rooms.last_seq - last_read_seq)
@@ -51,6 +54,7 @@ CREATE TABLE room_members (
   role           TEXT NOT NULL DEFAULT 'member' CHECK (role IN ('owner', 'admin', 'member')),
   joined_at      TEXT NOT NULL,
   last_read_seq  INTEGER NOT NULL DEFAULT 0,
+  muted          INTEGER NOT NULL DEFAULT 0,  -- 0003: 1 = ปิดแจ้งเตือนห้องนี้
   PRIMARY KEY (room_id, user_id)
 );
 CREATE INDEX idx_room_members_user ON room_members(user_id);
@@ -75,3 +79,26 @@ CREATE TABLE files (
 );
 CREATE INDEX idx_files_room ON files(room_id);
 CREATE INDEX idx_files_status_expires ON files(status, expires_at);
+
+-- ---------- เครื่องที่รับแจ้งเตือน (0003) ----------
+CREATE TABLE push_subscriptions (
+  id               TEXT PRIMARY KEY,
+  user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint         TEXT NOT NULL UNIQUE,
+  p256dh           TEXT NOT NULL,
+  auth             TEXT NOT NULL,
+  device_label     TEXT,
+  created_at       TEXT NOT NULL,
+  last_success_at  TEXT,
+  last_error       TEXT,
+  last_error_at    TEXT,
+  fail_count       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_push_user ON push_subscriptions(user_id);
+
+-- ---------- ค่าตั้งของระบบ เช่น กุญแจ VAPID (0003) ----------
+CREATE TABLE app_settings (
+  key         TEXT PRIMARY KEY,
+  value       TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);

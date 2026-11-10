@@ -2,10 +2,11 @@
 // ChatRoomPage.tsx — ห้องแชท: ข้อความเรียลไทม์ + สถานะส่ง/ส่งไม่สำเร็จ + สถานะการเชื่อมต่อ
 // กลุ่ม: แตะหัวห้องเพื่อดู/เพิ่มสมาชิก
 // เฟส 2: ส่งรูป (ย่อก่อนส่ง) / ส่งเป็นไฟล์ (ชัดเต็ม) / ไฟล์ / ข้อความเสียง
+// เฟส 3: ชาเนล (โพสต์ได้เฉพาะเจ้าของ/แอดมินชาเนล) · ปุ่ม 🔔/🔕 ปิดแจ้งเตือนรายห้อง
 // =====================================================================
 
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useParams } from 'react-router';
+import { useNavigate, useParams } from 'react-router';
 import { thaiClock, thaiDate } from '../../shared/time';
 import { MAX_MESSAGE_CHARS } from '../../shared/protocol';
 import { Room, RoomMember, User, api, errMsg } from '../api';
@@ -127,6 +128,19 @@ export default function ChatRoomPage() {
   }
 
   const isGroup = room?.type === 'group';
+  const isChannel = room?.type === 'channel';
+  const hasMembers = isGroup || isChannel;
+
+  async function toggleMute() {
+    if (!room) return;
+    try {
+      await api.post(`/api/rooms/${encodeURIComponent(room.id)}/mute`, { muted: !room.muted });
+      setRoom({ ...room, muted: !room.muted });
+      notify('success', room.muted ? 'เปิดแจ้งเตือนห้องนี้แล้ว' : 'ปิดแจ้งเตือนห้องนี้แล้ว');
+    } catch (e) {
+      notify('error', `ตั้งค่าแจ้งเตือนไม่สำเร็จ: ${errMsg(e)}`);
+    }
+  }
   const connText =
     s.conn === 'connecting' ? 'กำลังเชื่อมต่อ…'
     : s.conn === 'reconnecting' ? (s.connError ?? 'หลุดการเชื่อมต่อ กำลังต่อใหม่…')
@@ -139,11 +153,17 @@ export default function ChatRoomPage() {
       <TopBar
         back="/"
         title={
-          <button className="topbar-room" onClick={() => isGroup && setShowMembers(true)} disabled={!isGroup}>
-            <span>{room?.title ?? '…'}</span>
+          <button className="topbar-room" onClick={() => hasMembers && setShowMembers(true)} disabled={!hasMembers}>
+            <span>{isChannel ? '📢 ' : ''}{room?.title ?? '…'}</span>
             {isGroup && <span className="small muted">{members.length} คน · แตะเพื่อดูสมาชิก</span>}
+            {isChannel && <span className="small muted">ชาเนล · {members.length} ผู้ติดตาม · แตะเพื่อดูรายละเอียด</span>}
           </button>
         }
+        right={room && (
+          <button className="btn btn-small btn-ghost" onClick={() => void toggleMute()} aria-label={room.muted ? 'เปิดแจ้งเตือนห้องนี้' : 'ปิดแจ้งเตือนห้องนี้'}>
+            {room.muted ? '🔕' : '🔔'}
+          </button>
+        )}
       />
       {connText && <div className={`banner ${s.conn === 'failed' ? 'banner-error' : 'banner-warning'}`} role="status">{connText}</div>}
 
@@ -194,6 +214,9 @@ export default function ChatRoomPage() {
         ))}
       </div>
 
+      {room && !room.canPost ? (
+        <div className="readonly-note">📢 ชาเนลนี้โพสต์ได้เฉพาะเจ้าของและแอดมินชาเนล</div>
+      ) : (
       <form className="composer" onSubmit={submit}>
         {inputError && <p className="error-text small">{inputError}</p>}
         {preparing && <p className="small muted">กำลังย่อรูป…</p>}
@@ -226,6 +249,7 @@ export default function ChatRoomPage() {
         </>
         )}
       </form>
+      )}
 
       {showMembers && room && (
         <MembersPanel
@@ -247,6 +271,28 @@ function MembersPanel({ room, members, onClose, onChanged }: {
 }) {
   const notify = useNotify();
   const canAdd = room.myRole === 'owner' || room.myRole === 'admin';
+  const isOwner = room.myRole === 'owner';
+  const nav = useNavigate();
+
+  async function setRole(m: RoomMember, role: 'admin' | 'member') {
+    try {
+      await api.post(`/api/rooms/${encodeURIComponent(room.id)}/members/${encodeURIComponent(m.id)}/role`, { role });
+      notify('success', role === 'admin' ? `ตั้ง ${m.displayName} เป็นแอดมินแล้ว` : `ถอด ${m.displayName} จากแอดมินแล้ว`);
+      onChanged();
+    } catch (e) {
+      notify('error', errMsg(e));
+    }
+  }
+
+  async function leave() {
+    try {
+      await api.post(`/api/rooms/${encodeURIComponent(room.id)}/leave`);
+      notify('success', `เลิกติดตาม ${room.title} แล้ว`);
+      nav('/', { replace: true });
+    } catch (e) {
+      notify('error', errMsg(e));
+    }
+  }
   const [adding, setAdding] = useState(false);
   const [users, setUsers] = useState<User[] | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -290,16 +336,25 @@ function MembersPanel({ room, members, onClose, onChanged }: {
         </div>
         {!adding ? (
           <>
+            {room.description && <p className="small">{room.description}</p>}
             <ul className="user-list">
               {members.map((m) => (
                 <li key={m.id} className="user-item">
                   <Avatar name={m.displayName} url={m.pictureUrl} size={32} />
                   <span>{m.displayName}</span>
                   {m.role !== 'member' && <span className="small muted">{m.role === 'owner' ? 'เจ้าของ' : 'แอดมิน'}</span>}
+                  {isOwner && m.role !== 'owner' && (
+                    <button className="btn btn-small btn-ghost push-right" onClick={() => void setRole(m, m.role === 'admin' ? 'member' : 'admin')}>
+                      {m.role === 'admin' ? 'ถอดแอดมิน' : 'ตั้งเป็นแอดมิน'}
+                    </button>
+                  )}
                 </li>
               ))}
             </ul>
             {canAdd && <button className="btn btn-block" onClick={() => void openAdd()}>+ เพิ่มสมาชิก</button>}
+            {room.type === 'channel' && !isOwner && (
+              <button className="btn btn-ghost btn-block" onClick={() => void leave()}>เลิกติดตามชาเนลนี้</button>
+            )}
           </>
         ) : (
           <>

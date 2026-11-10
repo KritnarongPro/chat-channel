@@ -6,6 +6,7 @@
 //   1. ทางเข้า HTTP จาก worker (/ws, /history) — เรียกได้จาก worker เท่านั้น ไม่เปิดสู่ภายนอก
 //   2. WebSocket: รับข้อความ / sync / read / ping
 //   3. งานเขียนลง D1 (ข้อความล่าสุดของห้อง, อ่านถึงไหน) — ล้มเหลว → แจ้งผู้ส่งเสมอ
+//   4. แจ้งเตือนบนมือถือ (เฟส 3): หาผู้รับ → ใส่งานใน Queue chat-push (ไม่ส่งให้คนที่เปิดห้องนี้อยู่)
 //
 // worker ตรวจล็อกอิน + สิทธิ์สมาชิกห้องก่อนส่งต่อมาที่นี่ แล้วแนบหัว X-User-Id / X-User-Name / X-Room-Id
 // =====================================================================
@@ -17,6 +18,7 @@ import {
   HISTORY_LIMIT, MAX_MESSAGE_CHARS, SYNC_LIMIT,
 } from '../shared/protocol';
 import type { Env } from './lib';
+import type { PushJob } from './push';
 
 // =====================================================================
 // 0. โครงตารางในห้อง — ต้องตรงกับ do-schema.sql (check:rules ตรวจเลขเวอร์ชัน)
@@ -87,12 +89,14 @@ function previewOf(m: ChatMessage): string {
   return (m.body ? `${label} ${m.body}` : label).slice(0, 120);
 }
 
+interface RoomInfo { type: 'dm' | 'group' | 'channel'; title: string | null }
+
 type FileRow = {
   id: string; room_id: string; uploader_id: string; kind: 'image' | 'file' | 'voice'; mime: string; name: string;
   size: number; width: number | null; height: number | null; duration_ms: number | null; status: string; expires_at: string;
 };
 
-interface SocketInfo { userId: string; userName: string }
+interface SocketInfo { userId: string; userName: string; visible: boolean }
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -154,7 +158,7 @@ export class ChatRoom extends DurableObject<Env> {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       this.ctx.acceptWebSocket(server);
-      server.serializeAttachment({ userId, userName: decodeURIComponent(userName) } satisfies SocketInfo);
+      server.serializeAttachment({ userId, userName: decodeURIComponent(userName), visible: true } satisfies SocketInfo);
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -218,6 +222,9 @@ export class ChatRoom extends DurableObject<Env> {
         return;
       case 'read':
         await this.handleRead(ws, info, frame.seq);
+        return;
+      case 'presence':
+        ws.serializeAttachment({ ...info, visible: frame.visible === true } satisfies SocketInfo);
         return;
       case 'send':
         await this.handleSend(ws, info, frame.clientId, frame.body, frame.kind ?? 'text', frame.fileId);
@@ -294,6 +301,10 @@ export class ChatRoom extends DurableObject<Env> {
       return;
     }
 
+    // ---------- สิทธิ์: ยังเป็นสมาชิกอยู่ไหม + ชาเนลโพสต์ได้เฉพาะเจ้าของ/แอดมินชาเนล ----------
+    const room = await this.checkPoster(ws, clientId, info);
+    if (!room) return;
+
     // ---------- ไฟล์: ตรวจใน D1 แล้วจองไว้ (uploaded → attached) ก่อนบันทึกข้อความ ----------
     let file: FileRow | null = null;
     if (kind !== 'text') {
@@ -326,6 +337,35 @@ export class ChatRoom extends DurableObject<Env> {
     // ---------- อัปเดต D1: ลำดับข้อความของไฟล์ + หน้ารายการแชท ----------
     if (file) await this.setFileSeq(ws, file.id, message.seq);
     await this.updateRoomSummary(ws, message);
+    await this.queuePush(ws, message, room);
+  }
+
+  /** อ่านชนิดห้อง + ตำแหน่งผู้ส่งจาก D1 ทุกครั้งที่ส่ง (คนที่ถูกเอาออก/ถูกถอดแอดมินระหว่างเปิดห้องค้างไว้จะส่งไม่ได้) */
+  private async checkPoster(ws: WebSocket, clientId: string, info: SocketInfo): Promise<RoomInfo | null> {
+    const roomId = this.roomId;
+    let r: { type: RoomInfo['type']; title: string | null; role: string | null } | null;
+    try {
+      r = await this.env.DB.prepare(
+        `SELECT r.type, r.title, m.role FROM rooms r LEFT JOIN room_members m ON m.room_id = r.id AND m.user_id = ? WHERE r.id = ?`,
+      ).bind(info.userId, roomId).first();
+    } catch (err) {
+      console.error('ตรวจสิทธิ์ส่งข้อความไม่สำเร็จ', err);
+      this.send(ws, { type: 'error', clientId, code: 'DB_FAILED', message: 'ตรวจสิทธิ์ไม่สำเร็จ (ฐานข้อมูลขัดข้อง) กรุณากดส่งใหม่' });
+      return null;
+    }
+    if (!r) {
+      this.send(ws, { type: 'error', clientId, code: 'ROOM_NOT_FOUND', message: 'ไม่พบห้องนี้แล้ว' });
+      return null;
+    }
+    if (!r.role) {
+      this.send(ws, { type: 'error', clientId, code: 'NOT_MEMBER', message: 'คุณไม่ได้เป็นสมาชิกห้องนี้แล้ว' });
+      return null;
+    }
+    if (r.type === 'channel' && r.role !== 'owner' && r.role !== 'admin') {
+      this.send(ws, { type: 'error', clientId, code: 'NOT_CHANNEL_ADMIN', message: 'ชาเนลนี้โพสต์ได้เฉพาะเจ้าของและแอดมินชาเนล' });
+      return null;
+    }
+    return { type: r.type, title: r.title };
   }
 
   // =====================================================================
@@ -415,6 +455,53 @@ export class ChatRoom extends DurableObject<Env> {
     } catch (err) {
       console.error('บันทึกสถานะอ่านแล้วไม่สำเร็จ', err);
       this.send(ws, { type: 'warning', code: 'READ_FAILED', message: 'บันทึกสถานะ "อ่านแล้ว" ไม่สำเร็จ ตัวเลขยังไม่อ่านอาจไม่ตรง' });
+    }
+  }
+
+  // =====================================================================
+  // 4. แจ้งเตือนบนมือถือ
+  // =====================================================================
+  private async queuePush(ws: WebSocket, m: ChatMessage, room: RoomInfo) {
+    const roomId = this.roomId;
+    if (!roomId) return;
+    // คนที่เปิดหน้าจอห้องนี้อยู่ ไม่ต้องแจ้งเตือน
+    const viewing = new Set<string>();
+    for (const s of this.ctx.getWebSockets()) {
+      const i = s.deserializeAttachment() as SocketInfo | null;
+      if (i?.visible) viewing.add(i.userId);
+    }
+    let userIds: string[];
+    try {
+      const rows = await this.env.DB.prepare(
+        `SELECT m.user_id FROM room_members m JOIN users u ON u.id = m.user_id
+         WHERE m.room_id = ? AND m.user_id <> ? AND m.muted = 0 AND u.status = 'active'
+           AND EXISTS (SELECT 1 FROM push_subscriptions p WHERE p.user_id = m.user_id)`,
+      ).bind(roomId, m.senderId).all<{ user_id: string }>();
+      userIds = rows.results.map((r) => r.user_id).filter((id) => !viewing.has(id));
+    } catch (err) {
+      console.error('หาผู้รับแจ้งเตือนไม่สำเร็จ', err);
+      this.send(ws, { type: 'warning', code: 'PUSH_FAILED', message: 'ส่งข้อความแล้ว แต่ส่งแจ้งเตือนให้คนอื่นไม่สำเร็จ (ฐานข้อมูลขัดข้อง)' });
+      return;
+    }
+    if (userIds.length === 0) return;
+
+    // เนื้อหาแจ้งเตือน (ตามที่เลือก: แสดงชื่อคนส่ง + ข้อความ)
+    const text = m.kind === 'text' ? m.body
+      : m.kind === 'image' ? `[รูปภาพ]${m.body ? ' ' + m.body : ''}`
+      : m.kind === 'voice' ? '[ข้อความเสียง]'
+      : `[ไฟล์] ${m.file?.name ?? ''}`;
+    const title = room.type === 'dm' ? m.senderName : (room.title ?? (room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม'));
+    const body = (room.type === 'group' ? `${m.senderName}: ${text}` : text).slice(0, 200);
+    const payload = { title, body, url: `/room/${roomId}`, tag: `room-${roomId}` };
+
+    // ชุดละ 100 คน · sendBatch ได้ครั้งละ 100 งาน
+    const jobs: { body: PushJob }[] = [];
+    for (let i = 0; i < userIds.length; i += 100) jobs.push({ body: { userIds: userIds.slice(i, i + 100), payload } });
+    try {
+      for (let i = 0; i < jobs.length; i += 100) await this.env.PUSH_QUEUE.sendBatch(jobs.slice(i, i + 100));
+    } catch (err) {
+      console.error('ใส่งานแจ้งเตือนลง Queue ไม่สำเร็จ', err);
+      this.send(ws, { type: 'warning', code: 'PUSH_FAILED', message: 'ส่งข้อความแล้ว แต่ส่งแจ้งเตือนให้คนอื่นไม่สำเร็จ (Queue ขัดข้อง)' });
     }
   }
 }

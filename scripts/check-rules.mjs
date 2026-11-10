@@ -101,10 +101,22 @@ if (!/origin !== new URL\(req\.url\)\.origin/.test(index)) {
   if (/image\/svg/.test(read(join('shared', 'protocol.ts')))) fail('BUGS-04', 'ห้ามรับ SVG เป็นรูป (IMAGE_MIMES)');
 }
 
+// ---------- BUGS-05 ชาเนล: สิทธิ์โพสต์ต้องตรวจทั้งตอนส่งข้อความ (ห้อง) และตอนอัปโหลดไฟล์ (worker) ----------
+if (!/checkPoster\(/.test(room) || !/NOT_CHANNEL_ADMIN/.test(room)) fail('BUGS-05', 'worker/room.ts ต้องตรวจสิทธิ์โพสต์ชาเนล (checkPoster) ก่อนบันทึกข้อความ');
+if (!/requirePoster\(room\.type, role\)/.test(index)) fail('BUGS-05', 'uploadFile ต้องเรียก requirePoster ก่อนรับไฟล์');
+
+// ---------- BUGS-06 แจ้งเตือน: เครื่องที่เลิกรับ (404/410) ต้องถูกลบ ไม่งั้นส่งพลาดซ้ำทุกข้อความ ----------
+{
+  const push = read(join('worker', 'push.ts'));
+  if (!/res\.status === 404 \|\| res\.status === 410/.test(push) || !/DELETE FROM push_subscriptions/.test(push)) {
+    fail('BUGS-06', 'worker/push.ts ต้องลบ push_subscriptions เมื่อ push service ตอบ 404/410');
+  }
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..04, BUGS-01..04)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..04, BUGS-01..06)');

@@ -15,6 +15,9 @@ import ChatListPage from './pages/ChatListPage';
 import NewChatPage from './pages/NewChatPage';
 import ChatRoomPage from './pages/ChatRoomPage';
 import AdminPage from './pages/AdminPage';
+import ChannelsPage from './pages/ChannelsPage';
+import SettingsPage from './pages/SettingsPage';
+import { initPwa } from './pwa';
 import './styles.css';
 
 function App() {
@@ -71,6 +74,8 @@ function App() {
           <Route index element={<ChatListPage />} />
           <Route path="new" element={<NewChatPage />} />
           <Route path="room/:id" element={<ChatRoomPage />} />
+          <Route path="channels" element={<ChannelsPage />} />
+          <Route path="settings" element={<SettingsPage />} />
           <Route path="admin" element={me.user.role === 'admin' ? <AdminPage /> : <Navigate to="/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
@@ -78,6 +83,9 @@ function App() {
     </MeContext.Provider>
   );
 }
+
+// ติดตั้งแอป + แจ้งเตือน: ต้องดักเหตุการณ์ติดตั้งตั้งแต่เปิดหน้า
+initPwa();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
