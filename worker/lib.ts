@@ -18,6 +18,7 @@ export interface Env {
   DB: D1Database;
   ROOM: DurableObjectNamespace;
   FILES: R2Bucket;
+  PUSH_QUEUE: Queue<import('./push').PushJob>;
   ASSETS: Fetcher;
   APP_URL: string;
   APP_NAME: string;

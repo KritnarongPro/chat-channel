@@ -4,9 +4,9 @@
 //
 // สารบัญ
 //   1. Router + ตาราง endpoint แยกหมวด
-//   2. Handlers: health / auth / setup / admin / users / rooms / messages / files
-//   3. ตัวช่วยเรื่องห้อง (ตรวจสมาชิก)
-//   4. Entry point (fetch + scheduled: ลบไฟล์ครบ 180 วัน)
+//   2. Handlers: health / auth / setup / admin / users / rooms / channels / messages / files / push
+//   3. ตัวช่วยเรื่องห้อง (ตรวจสมาชิก, สิทธิ์โพสต์)
+//   4. Entry point (fetch + scheduled: ลบไฟล์ครบ 180 วัน + queue: ส่งแจ้งเตือน)
 //
 // กติกา: ข้อมูลไม่ผ่านเงื่อนไข หรือเขียน D1 ไม่สำเร็จ → ตอบ error พร้อมเหตุผลภาษาไทยเสมอ
 // สิทธิ์ทุก endpoint ตรวจผ่าน requireUser() ใน lib.ts ที่เดียว
@@ -18,6 +18,7 @@ import {
 } from '../shared/protocol';
 import { thaiAfter } from '../shared/time';
 import { cleanupFiles } from './cleanup';
+import { PushJob, getVapidKeys, handlePushQueue, sendToUsers } from './push';
 import {
   ApiError, Env, Need, User, clearSessionCookie, db, fail, newId, ok, readCookie, readJson,
   requireUser, sha256, SESSION_COOKIE, userOut,
@@ -65,6 +66,14 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/rooms/group',              need: 'active', handler: createGroup },
   { method: 'GET',  pattern: '/api/rooms/:id',                need: 'active', handler: getRoom },
   { method: 'POST', pattern: '/api/rooms/:id/members',        need: 'active', handler: addMembers },
+  { method: 'POST', pattern: '/api/rooms/:id/mute',           need: 'active', handler: setMute },
+
+  // ---------- channels (สร้างได้เฉพาะแอดมินระบบ · โพสต์ได้เฉพาะเจ้าของ/แอดมินชาเนล) ----------
+  { method: 'GET',  pattern: '/api/channels',                 need: 'active', handler: listChannels },
+  { method: 'POST', pattern: '/api/rooms/channel',            need: 'admin',  handler: createChannel },
+  { method: 'POST', pattern: '/api/rooms/:id/join',           need: 'active', handler: joinChannel },
+  { method: 'POST', pattern: '/api/rooms/:id/leave',          need: 'active', handler: leaveChannel },
+  { method: 'POST', pattern: '/api/rooms/:id/members/:userId/role', need: 'active', handler: setMemberRole },
 
   // ---------- messages (ส่งต่อไปที่ห้อง = Durable Object) ----------
   { method: 'GET',  pattern: '/api/rooms/:id/messages',       need: 'active', handler: history },
@@ -73,6 +82,13 @@ const routes: Route[] = [
   // ---------- files (รูป / ไฟล์ / เสียง — ตัวไฟล์อยู่ใน R2 เปิดได้เฉพาะสมาชิกห้อง) ----------
   { method: 'POST', pattern: '/api/rooms/:id/files',          need: 'active', handler: uploadFile },
   { method: 'GET',  pattern: '/api/files/:fileId',            need: 'active', handler: downloadFile },
+
+  // ---------- push (แจ้งเตือนบนมือถือ) ----------
+  { method: 'GET',  pattern: '/api/push/key',                 need: 'active', handler: pushKey },
+  { method: 'POST', pattern: '/api/push/subscribe',           need: 'active', handler: pushSubscribe },
+  { method: 'POST', pattern: '/api/push/unsubscribe',         need: 'active', handler: pushUnsubscribe },
+  { method: 'GET',  pattern: '/api/push/devices',             need: 'active', handler: pushDevices },
+  { method: 'POST', pattern: '/api/push/test',                need: 'active', handler: pushTest },
 ];
 
 function match(pattern: string, path: string): Record<string, string> | null {
@@ -229,13 +245,14 @@ type RoomListRow = {
   id: string; type: 'dm' | 'group' | 'channel'; title: string | null; last_seq: number;
   last_message_at: string | null; last_message_preview: string | null; last_sender_name: string | null;
   created_at: string; last_read_seq: number; my_role: string; peer_name: string | null; peer_picture: string | null;
+  visibility: 'public' | 'private' | null; description: string | null; muted: number;
 };
 
 async function listRooms(c: Ctx) {
   const rows = await db('อ่านรายการแชท', () =>
     c.env.DB.prepare(
       `SELECT r.id, r.type, r.title, r.last_seq, r.last_message_at, r.last_message_preview, r.last_sender_name,
-              r.created_at, m.last_read_seq, m.role AS my_role,
+              r.created_at, r.visibility, r.description, m.last_read_seq, m.role AS my_role, m.muted,
               (SELECT u.display_name FROM room_members m2 JOIN users u ON u.id = m2.user_id
                  WHERE m2.room_id = r.id AND m2.user_id <> ?1 LIMIT 1) AS peer_name,
               (SELECT u.picture_url FROM room_members m2 JOIN users u ON u.id = m2.user_id
@@ -252,7 +269,7 @@ function roomOut(r: RoomListRow) {
   return {
     id: r.id,
     type: r.type,
-    title: r.type === 'dm' ? (r.peer_name ?? 'แชท 1:1') : (r.title ?? 'กลุ่ม'),
+    title: r.type === 'dm' ? (r.peer_name ?? 'แชท 1:1') : (r.title ?? (r.type === 'channel' ? 'ชาเนล' : 'กลุ่ม')),
     picture: r.type === 'dm' ? r.peer_picture : null,
     lastSeq: r.last_seq,
     lastMessageAt: r.last_message_at,
@@ -261,6 +278,10 @@ function roomOut(r: RoomListRow) {
     createdAt: r.created_at,
     unread: Math.max(0, r.last_seq - r.last_read_seq),
     myRole: r.my_role,
+    muted: r.muted === 1,
+    visibility: r.visibility,
+    description: r.description,
+    canPost: r.type !== 'channel' || r.my_role === 'owner' || r.my_role === 'admin',
   };
 }
 
@@ -356,8 +377,8 @@ async function getRoom(c: Ctx) {
 
 async function addMembers(c: Ctx) {
   const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
-  if (room.type !== 'group') throw new ApiError(400, 'NOT_GROUP', 'เพิ่มสมาชิกได้เฉพาะห้องกลุ่ม');
-  if (role !== 'owner' && role !== 'admin') throw new ApiError(403, 'NOT_ROOM_ADMIN', 'เฉพาะเจ้าของ/แอดมินกลุ่มเท่านั้นที่เพิ่มสมาชิกได้');
+  if (room.type === 'dm') throw new ApiError(400, 'NOT_GROUP', 'เพิ่มสมาชิกได้เฉพาะกลุ่มและชาเนล');
+  if (role !== 'owner' && role !== 'admin') throw new ApiError(403, 'NOT_ROOM_ADMIN', 'เฉพาะเจ้าของ/แอดมินของห้องเท่านั้นที่เพิ่มสมาชิกได้');
   const body = await readJson<{ userIds?: unknown }>(c.req);
   if (!Array.isArray(body.userIds) || body.userIds.some((x) => typeof x !== 'string') || body.userIds.length === 0) {
     throw new ApiError(400, 'BAD_MEMBERS', 'กรุณาเลือกสมาชิกที่จะเพิ่ม');
@@ -377,6 +398,116 @@ async function addMembers(c: Ctx) {
       ).bind(c.params.id, uid, now, room.last_seq))),
   );
   return ok({ added: ids.length });
+}
+
+async function setMute(c: Ctx) {
+  await requireMember(c.env, c.params.id, c.user!.id);
+  const body = await readJson<{ muted?: unknown }>(c.req);
+  if (typeof body.muted !== 'boolean') throw new ApiError(400, 'BAD_MUTED', 'ค่าปิดเสียงต้องเป็น true หรือ false');
+  await db('บันทึกการปิดเสียง', () =>
+    c.env.DB.prepare(`UPDATE room_members SET muted = ? WHERE room_id = ? AND user_id = ?`)
+      .bind(body.muted ? 1 : 0, c.params.id, c.user!.id).run(),
+  );
+  return ok({ muted: body.muted });
+}
+
+// ---------- channels ----------
+async function listChannels(c: Ctx) {
+  const rows = await db('อ่านรายการชาเนล', () =>
+    c.env.DB.prepare(
+      `SELECT r.id, r.title, r.description, r.visibility, r.last_message_at, r.created_at,
+              (SELECT COUNT(*) FROM room_members x WHERE x.room_id = r.id) AS member_count,
+              (SELECT m.role FROM room_members m WHERE m.room_id = r.id AND m.user_id = ?1) AS my_role
+       FROM rooms r
+       WHERE r.type = 'channel'
+         AND (r.visibility = 'public' OR EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = r.id AND m.user_id = ?1))
+       ORDER BY COALESCE(r.last_message_at, r.created_at) DESC`,
+    ).bind(c.user!.id).all<{
+      id: string; title: string; description: string | null; visibility: 'public' | 'private';
+      last_message_at: string | null; created_at: string; member_count: number; my_role: string | null;
+    }>(),
+  );
+  return ok({
+    channels: rows.results.map((r) => ({
+      id: r.id, title: r.title, description: r.description, visibility: r.visibility,
+      lastMessageAt: r.last_message_at, createdAt: r.created_at, memberCount: r.member_count, joined: r.my_role !== null, myRole: r.my_role,
+    })),
+  });
+}
+
+async function createChannel(c: Ctx) {
+  const body = await readJson<{ title?: unknown; description?: unknown; visibility?: unknown; memberIds?: unknown }>(c.req);
+  const title = typeof body.title === 'string' ? body.title.trim() : '';
+  if (title.length < 1 || title.length > 80) throw new ApiError(400, 'BAD_TITLE', 'ชื่อชาเนลต้องมี 1–80 ตัวอักษร');
+  const description = typeof body.description === 'string' ? body.description.trim().slice(0, 300) : '';
+  if (body.visibility !== 'public' && body.visibility !== 'private') {
+    throw new ApiError(400, 'BAD_VISIBILITY', 'เลือกชนิดชาเนล: สาธารณะ หรือ ส่วนตัว');
+  }
+  const memberIds = Array.isArray(body.memberIds) ? [...new Set((body.memberIds as unknown[]).filter((x): x is string => typeof x === 'string'))] : [];
+  const ids = memberIds.filter((x) => x !== c.user!.id);
+  if (ids.length) {
+    const active = await activeUserIds(c.env, ids);
+    const missing = ids.filter((x) => !active.has(x));
+    if (missing.length) throw new ApiError(400, 'MEMBERS_NOT_ACTIVE', `มีสมาชิก ${missing.length} คนที่ไม่พบหรือยังไม่ได้รับอนุมัติ`);
+  }
+  const id = newId();
+  const now = nowThai();
+  await db('สร้างชาเนล', () =>
+    c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO rooms (id, type, title, description, visibility, created_by, created_at) VALUES (?, 'channel', ?, ?, ?, ?, ?)`,
+      ).bind(id, title, description || null, body.visibility, c.user!.id, now),
+      c.env.DB.prepare(`INSERT INTO room_members (room_id, user_id, role, joined_at) VALUES (?, ?, 'owner', ?)`)
+        .bind(id, c.user!.id, now),
+      ...ids.map((uid) =>
+        c.env.DB.prepare(`INSERT INTO room_members (room_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)`)
+          .bind(id, uid, now)),
+    ]),
+  );
+  return ok({ roomId: id }, 201);
+}
+
+async function joinChannel(c: Ctx) {
+  const room = await db('อ่านข้อมูลชาเนล', () =>
+    c.env.DB.prepare(`SELECT type, visibility, last_seq FROM rooms WHERE id = ?`).bind(c.params.id)
+      .first<{ type: string; visibility: string | null; last_seq: number }>(),
+  );
+  if (!room) throw new ApiError(404, 'ROOM_NOT_FOUND', 'ไม่พบชาเนลนี้');
+  if (room.type !== 'channel') throw new ApiError(400, 'NOT_CHANNEL', 'กดติดตามได้เฉพาะชาเนล');
+  if (room.visibility !== 'public') throw new ApiError(403, 'PRIVATE_CHANNEL', 'ชาเนลส่วนตัว ต้องให้เจ้าของหรือแอดมินชาเนลเพิ่มให้');
+  // คนใหม่เห็นโพสต์เก่าได้ แต่ไม่นับเป็น "ยังไม่อ่าน"
+  await db('ติดตามชาเนล', () =>
+    c.env.DB.prepare(
+      `INSERT OR IGNORE INTO room_members (room_id, user_id, role, joined_at, last_read_seq) VALUES (?, ?, 'member', ?, ?)`,
+    ).bind(c.params.id, c.user!.id, nowThai(), room.last_seq).run(),
+  );
+  return ok({ joined: true });
+}
+
+async function leaveChannel(c: Ctx) {
+  const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
+  if (room.type !== 'channel') throw new ApiError(400, 'NOT_CHANNEL', 'เลิกติดตามได้เฉพาะชาเนล');
+  if (role === 'owner') throw new ApiError(400, 'OWNER_CANNOT_LEAVE', 'เจ้าของชาเนลเลิกติดตามไม่ได้');
+  await db('เลิกติดตามชาเนล', () =>
+    c.env.DB.prepare(`DELETE FROM room_members WHERE room_id = ? AND user_id = ?`).bind(c.params.id, c.user!.id).run(),
+  );
+  return ok({ left: true });
+}
+
+/** เจ้าของชาเนล/กลุ่ม ตั้งหรือถอดแอดมินของห้อง */
+async function setMemberRole(c: Ctx) {
+  const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
+  if (room.type === 'dm') throw new ApiError(400, 'NOT_GROUP', 'แชท 1:1 ไม่มีแอดมิน');
+  if (role !== 'owner') throw new ApiError(403, 'NOT_OWNER', 'เฉพาะเจ้าของห้องเท่านั้นที่ตั้งแอดมินได้');
+  const body = await readJson<{ role?: unknown }>(c.req);
+  if (body.role !== 'admin' && body.role !== 'member') throw new ApiError(400, 'BAD_ROLE', 'ตำแหน่งต้องเป็น admin หรือ member');
+  if (c.params.userId === c.user!.id) throw new ApiError(400, 'SELF', 'เปลี่ยนตำแหน่งตัวเองไม่ได้');
+  const res = await db('เปลี่ยนตำแหน่งสมาชิก', () =>
+    c.env.DB.prepare(`UPDATE room_members SET role = ? WHERE room_id = ? AND user_id = ? AND role <> 'owner'`)
+      .bind(body.role, c.params.id, c.params.userId).run(),
+  );
+  if (res.meta.changes !== 1) throw new ApiError(404, 'MEMBER_NOT_FOUND', 'ไม่พบสมาชิกคนนี้ในห้อง');
+  return ok({ userId: c.params.userId, role: body.role });
 }
 
 // ---------- messages ----------
@@ -413,7 +544,8 @@ async function openSocket(c: Ctx) {
  * ลำดับ: เขียน R2 → บันทึก D1 (ไม่สำเร็จ → ลบไฟล์ใน R2 คืน แล้วตอบ error)
  */
 async function uploadFile(c: Ctx) {
-  await requireMember(c.env, c.params.id, c.user!.id);
+  const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
+  requirePoster(room.type, role);
   const h = c.req.headers;
   const kind = h.get('X-File-Kind') as FileKind | null;
   if (kind !== 'image' && kind !== 'file' && kind !== 'voice') {
@@ -526,9 +658,98 @@ async function downloadFile(c: Ctx) {
   return new Response(obj.body, { status: 200, headers });
 }
 
+// ---------- push ----------
+async function pushKey(c: Ctx) {
+  try {
+    return ok({ publicKey: (await getVapidKeys(c.env)).publicKey });
+  } catch (err) {
+    console.error('สร้าง/อ่านกุญแจ VAPID ไม่สำเร็จ', err);
+    throw new ApiError(500, 'VAPID_FAILED', 'เตรียมระบบแจ้งเตือนไม่สำเร็จ กรุณาลองใหม่');
+  }
+}
+
+async function pushSubscribe(c: Ctx) {
+  const body = await readJson<{ endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown }; label?: unknown }>(c.req);
+  const endpoint = body.endpoint;
+  const p256dh = body.keys?.p256dh;
+  const auth = body.keys?.auth;
+  if (typeof endpoint !== 'string' || !/^https:\/\//.test(endpoint) || endpoint.length > 1000) {
+    throw new ApiError(400, 'BAD_ENDPOINT', 'ข้อมูลเครื่องรับแจ้งเตือนไม่ถูกต้อง (endpoint)');
+  }
+  if (typeof p256dh !== 'string' || typeof auth !== 'string' || p256dh.length > 200 || auth.length > 100) {
+    throw new ApiError(400, 'BAD_KEYS', 'ข้อมูลเครื่องรับแจ้งเตือนไม่ถูกต้อง (keys)');
+  }
+  const label = typeof body.label === 'string' ? body.label.slice(0, 80) : null;
+  const now = nowThai();
+  // เครื่องเดิม (endpoint เดิม) → อัปเดตเจ้าของ/กุญแจ แทนการเพิ่มซ้ำ
+  await db('บันทึกเครื่องรับแจ้งเตือน', () =>
+    c.env.DB.prepare(
+      `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, device_label, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth,
+         device_label = excluded.device_label, last_error = NULL, fail_count = 0`,
+    ).bind(newId(), c.user!.id, endpoint, p256dh, auth, label, now).run(),
+  );
+  return ok({ subscribed: true });
+}
+
+async function pushUnsubscribe(c: Ctx) {
+  const body = await readJson<{ endpoint?: unknown; id?: unknown }>(c.req);
+  if (typeof body.endpoint !== 'string' && typeof body.id !== 'string') {
+    throw new ApiError(400, 'BAD_DEVICE', 'ระบุเครื่องที่จะยกเลิก');
+  }
+  const res = await db('ยกเลิกเครื่องรับแจ้งเตือน', () =>
+    (typeof body.id === 'string'
+      ? c.env.DB.prepare(`DELETE FROM push_subscriptions WHERE id = ? AND user_id = ?`).bind(body.id, c.user!.id)
+      : c.env.DB.prepare(`DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?`).bind(body.endpoint, c.user!.id)
+    ).run(),
+  );
+  return ok({ removed: res.meta.changes });
+}
+
+async function pushDevices(c: Ctx) {
+  const rows = await db('อ่านรายการเครื่อง', () =>
+    c.env.DB.prepare(
+      `SELECT id, endpoint, device_label, created_at, last_success_at, last_error, last_error_at, fail_count
+       FROM push_subscriptions WHERE user_id = ? ORDER BY created_at DESC`,
+    ).bind(c.user!.id).all<{
+      id: string; endpoint: string; device_label: string | null; created_at: string; last_success_at: string | null;
+      last_error: string | null; last_error_at: string | null; fail_count: number;
+    }>(),
+  );
+  return ok({
+    devices: rows.results.map((r) => ({
+      id: r.id, endpoint: r.endpoint, label: r.device_label, createdAt: r.created_at, lastSuccessAt: r.last_success_at,
+      lastError: r.last_error, lastErrorAt: r.last_error_at, failCount: r.fail_count,
+    })),
+  });
+}
+
+/** ส่งแจ้งเตือนทดสอบถึงทุกเครื่องของตัวเอง (ส่งตรง ไม่ผ่าน Queue) → ตอบผลพร้อมเหตุผลทันที */
+async function pushTest(c: Ctx) {
+  let r: { sent: number; failed: number; errors: string[] };
+  try {
+    r = await sendToUsers(c.env, [c.user!.id], {
+      title: 'ทดสอบแจ้งเตือน', body: `ระบบแจ้งเตือนใช้งานได้ (${nowThai().slice(11, 16)} น.)`, url: '/settings', tag: 'test',
+    });
+  } catch (err) {
+    console.error('ส่งแจ้งเตือนทดสอบไม่สำเร็จ', err);
+    throw new ApiError(500, 'PUSH_FAILED', 'ส่งแจ้งเตือนทดสอบไม่สำเร็จ (ระบบขัดข้อง)');
+  }
+  if (r.sent === 0 && r.failed === 0) throw new ApiError(400, 'NO_DEVICE', 'ยังไม่มีเครื่องที่เปิดรับแจ้งเตือน');
+  return ok(r);
+}
+
 // =====================================================================
 // 3. ตัวช่วยเรื่องห้อง
 // =====================================================================
+/** ชาเนล: โพสต์ได้เฉพาะเจ้าของ/แอดมินชาเนล (ห้องอื่นสมาชิกทุกคนโพสต์ได้) */
+function requirePoster(type: string, role: string) {
+  if (type === 'channel' && role !== 'owner' && role !== 'admin') {
+    throw new ApiError(403, 'NOT_CHANNEL_ADMIN', 'ชาเนลนี้โพสต์ได้เฉพาะเจ้าของและแอดมินชาเนล');
+  }
+}
+
 function roomStub(env: Env, roomId: string) {
   return env.ROOM.get(env.ROOM.idFromName(roomId));
 }
@@ -537,7 +758,7 @@ async function requireMember(env: Env, roomId: string, userId: string) {
   const row = await db('ตรวจสิทธิ์ในห้อง', () =>
     env.DB.prepare(
       `SELECT r.id, r.type, r.title, r.last_seq, r.last_message_at, r.last_message_preview, r.last_sender_name,
-              r.created_at, m.last_read_seq, m.role AS my_role,
+              r.created_at, r.visibility, r.description, m.last_read_seq, m.role AS my_role, m.muted,
               (SELECT u.display_name FROM room_members m2 JOIN users u ON u.id = m2.user_id
                  WHERE m2.room_id = r.id AND m2.user_id <> ?2 LIMIT 1) AS peer_name,
               (SELECT u.picture_url FROM room_members m2 JOIN users u ON u.id = m2.user_id
@@ -565,4 +786,9 @@ export default {
   async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(cleanupFiles(env));
   },
-} satisfies ExportedHandler<Env>;
+
+  // Queue chat-push: ส่งแจ้งเตือนบนมือถือ (ห้องแชทใส่งานไว้ ดู worker/room.ts → queuePush)
+  async queue(batch: MessageBatch<PushJob>, env: Env) {
+    await handlePushQueue(batch, env);
+  },
+} satisfies ExportedHandler<Env, PushJob>;

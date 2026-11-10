@@ -145,6 +145,8 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
         failsRef.current = 0;
         setConn('open');
         setConnError(null);
+        // บอกห้องว่าหน้าจอเปิดอยู่ไหม (เปิดอยู่ = ไม่ต้องส่งแจ้งเตือนให้เรา)
+        ws.send(JSON.stringify({ type: 'presence', visible: document.visibilityState === 'visible' } satisfies ClientFrame));
         initialSyncRef.current = lastSeqRef.current === 0;
         ws.send(JSON.stringify({ type: 'sync', afterSeq: lastSeqRef.current } satisfies ClientFrame));
         // ข้อความที่ค้าง "กำลังส่ง" ตอนเน็ตหลุด → ส่งอีกรอบ (รหัสเดิม ไม่ซ้ำ)
@@ -198,8 +200,12 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
       };
     };
 
+    const onVisibility = () => rawSend({ type: 'presence', visible: document.visibilityState === 'visible' });
+    document.addEventListener('visibilitychange', onVisibility);
+
     connect();
     return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
       stopped = true;
       if (retryTimer) clearTimeout(retryTimer);
       if (pingTimer) clearInterval(pingTimer);

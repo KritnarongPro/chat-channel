@@ -20,7 +20,9 @@
    - `SETUP_TOKEN` — รหัสยาว ๆ ที่ตั้งเอง ใช้ครั้งเดียวตอนตั้งแอดมินคนแรก
 3. **LINE Login channel** → Callback URL: `https://noti.kalon-ai.app/api/auth/line/callback` · เปิด scope `openid` + `profile`
 4. **R2 bucket** ชื่อ `chat-channel` (เก็บรูป/ไฟล์/เสียง) — ไม่ต้องเปิด public access
-5. **โดเมน** `noti.kalon-ai.app` — โซน `kalon-ai.app` ต้องอยู่ใน Cloudflare account เดียวกัน (ตั้งใน `wrangler.jsonc` → routes)
+5. **Queue** ชื่อ `chat-push` (Workers & Pages → Queues → Create) — ใช้กระจายแจ้งเตือน · API token ของ GitHub Actions ต้องมีสิทธิ์ **Queues: Edit**
+6. **LINE Login channel ต้องเป็น Published** (ไม่งั้นล็อกอินได้เฉพาะ Admin/Tester ของ channel)
+7. **โดเมน** `noti.kalon-ai.app` — โซน `kalon-ai.app` ต้องอยู่ใน Cloudflare account เดียวกัน (ตั้งใน `wrangler.jsonc` → routes)
 
 ## ใช้งานครั้งแรก
 
@@ -40,6 +42,8 @@
 | `do-schema.sql` | ตารางในห้อง (ข้อความ) — ใช้อ่านอ้างอิง ตัวจริงอยู่ใน `worker/room.ts` |
 | `worker/cleanup.ts` | งานทุกวัน 03:00 เวลาไทย: ลบไฟล์ครบ 180 วัน + ไฟล์ที่อัปแล้วไม่ได้ส่ง |
 | `src/media.ts`, `src/VoiceRecorder.tsx`, `src/MessageContent.tsx` | ย่อรูป, อัดเสียง, แสดงรูป/ไฟล์/เสียง |
+| `worker/push.ts` | แจ้งเตือนบนมือถือ: กุญแจ VAPID (สร้างเองเก็บใน app_settings), เข้ารหัส RFC 8291, ส่ง, Queue consumer |
+| `public/sw.js`, `src/pwa.ts`, `src/SetupCard.tsx` | ติดตั้งแอป (คลิกเดียวบน Android/คอม, วิธีทำบน iPhone, ออกจากในแอป LINE) + เปิดแจ้งเตือน |
 | `shared/time.ts` | เวลาไทย — ห้ามใช้ `toISOString()` ที่อื่น |
 | `scripts/check-rules.mjs` | ข้อสอบอัตโนมัติจาก cheat sheet |
 
@@ -47,5 +51,5 @@
 
 - [x] เฟส 1: ล็อกอิน LINE + อนุมัติผู้ใช้ + แชท 1:1 และกลุ่มแบบเรียลไทม์
 - [x] เฟส 2: รูป (ย่อ 1600px) / ส่งเป็นไฟล์ / ข้อความเสียง 5 นาที — R2, เปิดได้เฉพาะสมาชิกห้อง, ลบอัตโนมัติ 180 วัน
-- [ ] เฟส 3: ชาเนล + แจ้งเตือน (Web Push / PWA)
+- [x] เฟส 3: ชาเนล (สาธารณะ/ส่วนตัว, แอดมินระบบสร้าง, เจ้าของ/แอดมินชาเนลโพสต์) + แจ้งเตือน Web Push ผ่าน Queue + ติดตั้งแอป
 - [ ] เฟส 4: ระบบบอท (token + webhook) + n8n + บอท AI + โพสต์ข่าวอัตโนมัติ + ฟอร์มรับออเดอร์

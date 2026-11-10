@@ -9,6 +9,7 @@ import { thaiShort } from '../../shared/time';
 import { Room, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
+import SetupCard from '../SetupCard';
 
 const REFRESH_MS = 15_000;
 
@@ -41,11 +42,14 @@ export default function ChatListPage() {
         title={me.appName}
         right={
           <>
+            <Link to="/channels" className="btn btn-small btn-ghost">ชาเนล</Link>
+            <Link to="/settings" className="btn btn-small btn-ghost" aria-label="ตั้งค่าแจ้งเตือน">🔔</Link>
             {me.user.role === 'admin' && <Link to="/admin" className="btn btn-small btn-ghost">แอดมิน</Link>}
             <button className="btn btn-small btn-ghost" onClick={() => void logout()}>ออก</button>
           </>
         }
       />
+      <SetupCard />
       {error && (
         <div className="banner banner-error" role="alert">
           {error} <button className="link" onClick={() => void load()}>ลองใหม่</button>
@@ -60,7 +64,7 @@ export default function ChatListPage() {
               <Avatar name={r.title} url={r.picture} />
               <div className="room-main">
                 <div className="room-top">
-                  <span className="room-title">{r.type === 'group' ? '👥 ' : ''}{r.title}</span>
+                  <span className="room-title">{r.type === 'group' ? '👥 ' : r.type === 'channel' ? '📢 ' : ''}{r.muted ? '🔕 ' : ''}{r.title}</span>
                   <span className="room-time">{thaiShort(r.lastMessageAt ?? r.createdAt)}</span>
                 </div>
                 <div className="room-bottom">

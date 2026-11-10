@@ -107,6 +107,10 @@ export interface Room {
   createdAt: string;
   unread: number;
   myRole: string;
+  muted: boolean;                              // เฟส 3: ปิดแจ้งเตือนห้องนี้
+  visibility: 'public' | 'private' | null;     // เฟส 3: ชาเนลสาธารณะ/ส่วนตัว
+  description: string | null;
+  canPost: boolean;                            // ชาเนล: เฉพาะเจ้าของ/แอดมินชาเนล
 }
 
 export interface RoomMember { id: string; displayName: string; pictureUrl: string | null; role: string }
