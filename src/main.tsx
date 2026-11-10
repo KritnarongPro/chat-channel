@@ -18,6 +18,10 @@ import AdminPage from './pages/AdminPage';
 import ChannelsPage from './pages/ChannelsPage';
 import SettingsPage from './pages/SettingsPage';
 import { initPwa } from './pwa';
+import AdminBotsPage from './pages/AdminBotsPage';
+import AdminFormsPage from './pages/AdminFormsPage';
+import FormFillPage from './pages/FormFillPage';
+import OrdersPage from './pages/OrdersPage';
 import './styles.css';
 
 function App() {
@@ -76,6 +80,10 @@ function App() {
           <Route path="room/:id" element={<ChatRoomPage />} />
           <Route path="channels" element={<ChannelsPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          <Route path="form/:formId" element={<FormFillPage />} />
+          <Route path="orders" element={<OrdersPage />} />
+          <Route path="admin/bots" element={me.user.role === 'admin' ? <AdminBotsPage /> : <Navigate to="/" replace />} />
+          <Route path="admin/forms" element={me.user.role === 'admin' ? <AdminFormsPage /> : <Navigate to="/" replace />} />
           <Route path="admin" element={me.user.role === 'admin' ? <AdminPage /> : <Navigate to="/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

@@ -6,7 +6,8 @@
 //   2. กุญแจ VAPID (ระบบสร้างเองครั้งแรก เก็บในตาราง app_settings)
 //   3. เข้ารหัสข้อความตามมาตรฐาน RFC 8291 (aes128gcm) + ลายเซ็น VAPID (RFC 8292)
 //   4. ส่งถึง 1 เครื่อง → คืนผลพร้อมเหตุผล
-//   5. Queue consumer: กระจายแจ้งเตือนให้ผู้รับ (ชุดละไม่เกิน 100 คน)
+//   5. Queue consumer (queue chat-push): งาน push = แจ้งเตือนมือถือ (ชุดละไม่เกิน 100 คน)
+//                                         งาน webhook = ส่งข้อความ/ออเดอร์ถึงบอท (เฟส 4)
 // =====================================================================
 
 import { nowThai } from '../shared/time';
@@ -189,10 +190,18 @@ export async function sendToUsers(env: Env, userIds: string[], payload: PushPayl
 // =====================================================================
 // 5. Queue consumer
 // =====================================================================
-export interface PushJob { userIds: string[]; payload: PushPayload }
+/** งานใน queue: งานเก่าก่อนเฟส 4 ไม่มี type = งาน push */
+export type PushJob =
+  | { type?: 'push'; userIds: string[]; payload: PushPayload }
+  | { type: 'webhook'; botId: string; update: Record<string, unknown> };
 
 export async function handlePushQueue(batch: MessageBatch<PushJob>, env: Env) {
   for (const msg of batch.messages) {
+    if (msg.body.type === 'webhook') {
+      const r = await deliverWebhook(env, msg.body.botId, msg.body.update);
+      if (r === 'retry') msg.retry(); else msg.ack();
+      continue;
+    }
     try {
       const r = await sendToUsers(env, msg.body.userIds, msg.body.payload);
       if (r.failed) console.error(`push: ส่งไม่สำเร็จ ${r.failed} เครื่อง`, r.errors.slice(0, 5));
@@ -203,4 +212,48 @@ export async function handlePushQueue(batch: MessageBatch<PushJob>, env: Env) {
       msg.retry();
     }
   }
+}
+
+// =====================================================================
+// 6. ส่งถึง webhook ของบอท (เฟส 4)
+//    หัว X-Bot-Secret = webhook_secret ของบอท ให้ปลายทาง (n8n) ตรวจว่ามาจากระบบเราจริง
+//    ไม่สำเร็จ → บันทึก last_error + fail_count (เห็นในหน้า แอดมิน → บอท) แล้วให้ Queue ลองใหม่ (สูงสุด 3 ครั้ง)
+// =====================================================================
+export async function deliverWebhook(env: Env, botId: string, update: Record<string, unknown>): Promise<'ok' | 'retry' | 'skip'> {
+  let bot: { webhook_url: string | null; webhook_secret: string; enabled: number; display_name: string } | null;
+  try {
+    bot = await env.DB.prepare(
+      `SELECT b.webhook_url, b.webhook_secret, b.enabled, u.display_name FROM bots b JOIN users u ON u.id = b.id WHERE b.id = ?`,
+    ).bind(botId).first();
+  } catch (err) {
+    console.error('webhook: อ่านข้อมูลบอทไม่สำเร็จ จะลองใหม่', err);
+    return 'retry';
+  }
+  if (!bot || !bot.enabled || !bot.webhook_url) return 'skip'; // บอทถูกลบ/ปิด/ไม่มี webhook → ทิ้งงาน
+  const now = nowThai();
+  let reason: string | null = null;
+  try {
+    const res = await fetch(bot.webhook_url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Bot-Secret': bot.webhook_secret },
+      body: JSON.stringify({ ...update, bot: { id: botId, name: bot.display_name }, sentAt: now }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) reason = `webhook ตอบ HTTP ${res.status} ${(await res.text()).slice(0, 200)}`;
+  } catch (err) {
+    reason = `ติดต่อ webhook ไม่ได้: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  try {
+    await (reason
+      ? env.DB.prepare(`UPDATE bots SET last_error = ?, last_error_at = ?, fail_count = fail_count + 1 WHERE id = ?`).bind(reason, now, botId)
+      : env.DB.prepare(`UPDATE bots SET last_delivery_at = ?, fail_count = 0 WHERE id = ?`).bind(now, botId)
+    ).run();
+  } catch (err) {
+    console.error('webhook: บันทึกผลส่งไม่สำเร็จ', err);
+  }
+  if (reason) {
+    console.error(`webhook บอท ${botId}: ${reason}`);
+    return 'retry';
+  }
+  return 'ok';
 }

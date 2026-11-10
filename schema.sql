@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0003_channels_push.sql
+-- ล่าสุดถึง: 0004_bots_forms.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -13,6 +13,7 @@ CREATE TABLE users (
   picture_url   TEXT,
   status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'blocked')),
   role          TEXT NOT NULL DEFAULT 'member'  CHECK (role IN ('member', 'admin')),
+  is_bot        INTEGER NOT NULL DEFAULT 0,  -- 0004: 1 = บอท (line_user_id = 'bot:<id>')
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );
@@ -102,3 +103,52 @@ CREATE TABLE app_settings (
   value       TEXT NOT NULL,
   updated_at  TEXT NOT NULL
 );
+
+-- ---------- บอท / ฟอร์ม / ออเดอร์ (0004) ----------
+CREATE TABLE bots (
+  id                TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  token_hash        TEXT NOT NULL UNIQUE,
+  token_hint        TEXT NOT NULL,
+  webhook_url       TEXT,
+  webhook_secret    TEXT NOT NULL,
+  enabled           INTEGER NOT NULL DEFAULT 1,
+  created_by        TEXT NOT NULL REFERENCES users(id),
+  created_at        TEXT NOT NULL,
+  last_delivery_at  TEXT,
+  last_error        TEXT,
+  last_error_at     TEXT,
+  fail_count        INTEGER NOT NULL DEFAULT 0
+);
+
+-- ---------- ฟอร์ม (สร้างจากหน้า แอดมิน → ฟอร์ม) ----------
+-- fields_json: [{ id, label, type: text|textarea|number|select|phone|date, required, options?, min?, max? }]
+-- bot_id: บอทที่จะได้รับออเดอร์จากฟอร์มนี้ทาง webhook (ไม่ใส่ก็ได้)
+CREATE TABLE forms (
+  id           TEXT PRIMARY KEY,
+  title        TEXT NOT NULL,
+  description  TEXT,
+  fields_json  TEXT NOT NULL,
+  bot_id       TEXT REFERENCES bots(id) ON DELETE SET NULL,
+  active       INTEGER NOT NULL DEFAULT 1,
+  created_by   TEXT NOT NULL REFERENCES users(id),
+  created_at   TEXT NOT NULL,
+  updated_at   TEXT NOT NULL
+);
+
+-- ---------- ออเดอร์ (เลขออเดอร์ = id) ----------
+-- data_json: คำตอบที่กรอก { fieldId: value } · form_snapshot: สำเนาฟอร์มตอนกรอก (แก้ฟอร์มทีหลัง ออเดอร์เก่าไม่เพี้ยน)
+-- status: new = ใหม่ · in_progress = กำลังทำ · done = เสร็จ · cancelled = ยกเลิก
+CREATE TABLE orders (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  form_id        TEXT NOT NULL REFERENCES forms(id),
+  room_id        TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  user_id        TEXT NOT NULL REFERENCES users(id),
+  data_json      TEXT NOT NULL,
+  form_snapshot  TEXT NOT NULL,
+  status         TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'in_progress', 'done', 'cancelled')),
+  status_note    TEXT,
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+);
+CREATE INDEX idx_orders_status ON orders(status, created_at);
+CREATE INDEX idx_orders_user ON orders(user_id, created_at);

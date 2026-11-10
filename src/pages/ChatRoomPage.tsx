@@ -9,7 +9,7 @@ import { FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useR
 import { useNavigate, useParams } from 'react-router';
 import { thaiClock, thaiDate } from '../../shared/time';
 import { MAX_MESSAGE_CHARS } from '../../shared/protocol';
-import { Room, RoomMember, User, api, errMsg } from '../api';
+import { FormInfo, Room, RoomMember, User, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
@@ -113,6 +113,25 @@ export default function ChatRoomPage() {
     if (fileInput.current) fileInput.current.value = '';
   }
 
+  // ---------- เฟส 4: แอดมินส่งการ์ดฟอร์ม ----------
+  const [formPicker, setFormPicker] = useState<FormInfo[] | null>(null);
+  async function openFormPicker() {
+    try {
+      const d = await api.get<{ forms: FormInfo[] }>('/api/admin/forms');
+      const active = d.forms.filter((f) => f.active);
+      if (active.length === 0) { notify('warning', 'ยังไม่มีฟอร์มที่เปิดใช้ — สร้างได้ที่ แอดมิน → ฟอร์ม'); return; }
+      setFormPicker(active);
+    } catch (e) {
+      notify('error', `โหลดรายการฟอร์มไม่สำเร็จ: ${errMsg(e)}`);
+    }
+  }
+  function pickForm(f: FormInfo) {
+    s.sendForm(f.id, f.title, text);
+    setText('');
+    setFormPicker(null);
+    stickBottom.current = true;
+  }
+
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
     // Enter = ส่ง · Shift+Enter = ขึ้นบรรทัดใหม่ (บนคอมพิวเตอร์)
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
@@ -180,7 +199,7 @@ export default function ChatRoomPage() {
               <div className={`bubble-row ${mine ? 'mine' : ''}`}>
                 <div className="bubble">
                   {!mine && isGroup && <div className="bubble-name">{m.senderName}</div>}
-                  <MessageContent m={m} />
+                  <MessageContent m={m} roomId={id} />
                   <div className="bubble-meta">{thaiClock(m.createdAt)}</div>
                 </div>
               </div>
@@ -191,6 +210,7 @@ export default function ChatRoomPage() {
           <div key={p.clientId} className="bubble-row mine">
             <div className={`bubble ${p.status === 'failed' ? 'bubble-failed' : 'bubble-sending'}`}>
               {p.previewUrl && <img className="msg-image" src={p.previewUrl} alt="" />}
+              {p.kind === 'form' && <div className="small">📝 การ์ดฟอร์ม: {p.extra?.formTitle}</div>}
               {p.file && p.kind !== 'image' && (
                 <div className="small">{p.kind === 'voice' ? '🎤 ข้อความเสียง' : `📄 ${p.file.name}`} · {formatSize(p.file.blob.size)}</div>
               )}
@@ -232,6 +252,9 @@ export default function ChatRoomPage() {
           <button type="button" className="tool" onClick={() => imageInput.current?.click()} disabled={s.conn === 'failed'}>🖼 รูป</button>
           <button type="button" className="tool" onClick={() => fileInput.current?.click()} disabled={s.conn === 'failed'}>📎 ส่งเป็นไฟล์</button>
           <button type="button" className="tool" onClick={() => setRecording(true)} disabled={s.conn === 'failed'}>🎤 เสียง</button>
+          {me.user.role === 'admin' && (
+            <button type="button" className="tool" onClick={() => void openFormPicker()} disabled={s.conn === 'failed'}>📝 ฟอร์ม</button>
+          )}
           <input ref={imageInput} type="file" accept="image/*" multiple hidden onChange={(e) => void onPickImages(e.target.files)} />
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => onPickFiles(e.target.files)} />
         </div>
@@ -249,6 +272,18 @@ export default function ChatRoomPage() {
         </>
         )}
       </form>
+      )}
+
+      {formPicker && (
+        <div className="sheet-backdrop" onClick={() => setFormPicker(null)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-head"><b>เลือกฟอร์มที่จะส่ง</b><button className="link" onClick={() => setFormPicker(null)}>ปิด</button></div>
+            <p className="small muted">ข้อความในช่องพิมพ์ (ถ้ามี) จะแสดงเหนือการ์ด</p>
+            {formPicker.map((f) => (
+              <button key={f.id} className="btn btn-ghost btn-block" onClick={() => pickForm(f)}>📝 {f.title}</button>
+            ))}
+          </div>
+        </div>
       )}
 
       {showMembers && room && (

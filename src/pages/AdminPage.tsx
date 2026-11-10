@@ -3,6 +3,7 @@
 // =====================================================================
 
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router';
 import { thaiDate, thaiClock } from '../../shared/time';
 import { User, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
@@ -45,6 +46,11 @@ export default function AdminPage() {
   return (
     <div className="page">
       <TopBar title="แอดมิน: ผู้ใช้" back="/" />
+      <div className="chips">
+        <Link className="chip" to="/admin/bots">🤖 บอท</Link>
+        <Link className="chip" to="/admin/forms">📝 ฟอร์ม</Link>
+        <Link className="chip" to="/orders">📦 ออเดอร์</Link>
+      </div>
       {error && <div className="banner banner-error" role="alert">{error}</div>}
       {users === null && !error && <p className="center muted">กำลังโหลด…</p>}
       <ul className="user-list">

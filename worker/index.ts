@@ -5,6 +5,7 @@
 // สารบัญ
 //   1. Router + ตาราง endpoint แยกหมวด
 //   2. Handlers: health / auth / setup / admin / users / rooms / channels / messages / files / push
+//                bots (แอดมินจัดการ) / bot-api (บอทเรียกด้วย token) / forms / orders   ← เฟส 4
 //   3. ตัวช่วยเรื่องห้อง (ตรวจสมาชิก, สิทธิ์โพสต์)
 //   4. Entry point (fetch + scheduled: ลบไฟล์ครบ 180 วัน + queue: ส่งแจ้งเตือน)
 //
@@ -18,11 +19,12 @@ import {
 } from '../shared/protocol';
 import { thaiAfter } from '../shared/time';
 import { cleanupFiles } from './cleanup';
-import { PushJob, getVapidKeys, handlePushQueue, sendToUsers } from './push';
+import { PushJob, deliverWebhook, getVapidKeys, handlePushQueue, sendToUsers } from './push';
 import {
-  ApiError, Env, Need, User, clearSessionCookie, db, fail, newId, ok, readCookie, readJson,
-  requireUser, sha256, SESSION_COOKIE, userOut,
+  ApiError, Env, Need, User, clearSessionCookie, db, fail, newId, ok, randomToken, readCookie, readJson,
+  requireBot, requireUser, sha256, SESSION_COOKIE, userOut,
 } from './lib';
+import { FormField, OrderStatus, ORDER_STATUS_TH, checkFormDef, checkSubmission } from '../shared/forms';
 import { lineCallback, lineConfigError, lineStart } from './auth-line';
 
 export { ChatRoom } from './room';
@@ -89,6 +91,32 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/push/unsubscribe',         need: 'active', handler: pushUnsubscribe },
   { method: 'GET',  pattern: '/api/push/devices',             need: 'active', handler: pushDevices },
   { method: 'POST', pattern: '/api/push/test',                need: 'active', handler: pushTest },
+
+  // ---------- bots: แอดมินระบบสร้าง/แก้/ปิดบอท ----------
+  { method: 'GET',  pattern: '/api/admin/bots',               need: 'admin',  handler: adminListBots },
+  { method: 'POST', pattern: '/api/admin/bots',               need: 'admin',  handler: adminCreateBot },
+  { method: 'POST', pattern: '/api/admin/bots/:id',           need: 'admin',  handler: adminUpdateBot },
+  { method: 'POST', pattern: '/api/admin/bots/:id/token',     need: 'admin',  handler: adminRegenToken },
+  { method: 'POST', pattern: '/api/admin/bots/:id/test',      need: 'admin',  handler: adminTestWebhook },
+
+  // ---------- bot-api: บอท (เช่น n8n) เรียกด้วย Authorization: Bearer <token> ----------
+  { method: 'GET',  pattern: '/api/bot/me',                   need: 'bot',    handler: botMe },
+  { method: 'GET',  pattern: '/api/bot/rooms',                need: 'bot',    handler: botRooms },
+  { method: 'POST', pattern: '/api/bot/sendMessage',          need: 'bot',    handler: botSendMessage },
+  { method: 'POST', pattern: '/api/bot/sendForm',             need: 'bot',    handler: botSendForm },
+  { method: 'GET',  pattern: '/api/bot/orders',               need: 'bot',    handler: botOrders },
+  { method: 'POST', pattern: '/api/bot/orders/:orderId/status', need: 'bot',  handler: botSetOrderStatus },
+
+  // ---------- forms: แอดมินสร้าง/แก้ · ผู้ใช้เปิดกรอกจากการ์ดในห้อง ----------
+  { method: 'GET',  pattern: '/api/admin/forms',              need: 'admin',  handler: adminListForms },
+  { method: 'POST', pattern: '/api/admin/forms',              need: 'admin',  handler: adminSaveForm },
+  { method: 'POST', pattern: '/api/admin/forms/:formId',      need: 'admin',  handler: adminSaveForm },
+  { method: 'GET',  pattern: '/api/forms/:formId',            need: 'active', handler: getForm },
+  { method: 'POST', pattern: '/api/forms/:formId/submit',     need: 'active', handler: submitForm },
+
+  // ---------- orders: แอดมินเห็นทั้งหมด + เปลี่ยนสถานะ · ผู้ใช้เห็นของตัวเอง ----------
+  { method: 'GET',  pattern: '/api/orders',                   need: 'active', handler: listOrders },
+  { method: 'POST', pattern: '/api/orders/:orderId/status',   need: 'admin',  handler: adminSetOrderStatus },
 ];
 
 function match(pattern: string, path: string): Record<string, string> | null {
@@ -103,8 +131,10 @@ function match(pattern: string, path: string): Record<string, string> | null {
   return params;
 }
 
-/** กันเว็บอื่นยิงคำสั่งแทนผู้ใช้ (CSRF / WebSocket hijack): POST และ WebSocket ต้องมาจากโดเมนของเราเท่านั้น */
+/** กันเว็บอื่นยิงคำสั่งแทนผู้ใช้ (CSRF / WebSocket hijack): POST และ WebSocket ต้องมาจากโดเมนของเราเท่านั้น
+ *  (Bot API ใช้ token ในหัว Authorization ไม่ใช้ cookie จึงไม่ต้องตรวจ Origin) */
 function checkOrigin(req: Request, env: Env) {
+  if (new URL(req.url).pathname.startsWith('/api/bot/')) return;
   const isWs = req.headers.get('Upgrade') === 'websocket';
   if (req.method === 'GET' && !isWs) return;
   const origin = req.headers.get('Origin');
@@ -123,7 +153,9 @@ async function route(req: Request, env: Env): Promise<Response> {
     if (r.method !== req.method) { methodMismatch = true; continue; }
     try {
       checkOrigin(req, env);
-      const user = r.need === 'public' ? null : await requireUser(req, env, r.need);
+      const user = r.need === 'public' ? null
+        : r.need === 'bot' ? await requireBot(req, env)
+        : await requireUser(req, env, r.need);
       return await r.handler({ req, env, url, params, user });
     } catch (err) {
       if (err instanceof ApiError) return fail(err.status, err.code, err.message);
@@ -203,8 +235,8 @@ async function adminListUsers(c: Ctx) {
   }
   const rows = await db('อ่านรายชื่อผู้ใช้', () =>
     (status
-      ? c.env.DB.prepare(`SELECT * FROM users WHERE status = ? ORDER BY created_at DESC`).bind(status)
-      : c.env.DB.prepare(`SELECT * FROM users ORDER BY status = 'pending' DESC, created_at DESC`)
+      ? c.env.DB.prepare(`SELECT * FROM users WHERE status = ? AND is_bot = 0 ORDER BY created_at DESC`).bind(status)
+      : c.env.DB.prepare(`SELECT * FROM users WHERE is_bot = 0 ORDER BY status = 'pending' DESC, created_at DESC`)
     ).all<Parameters<typeof userOut>[0] & { created_at: string }>(),
   );
   return ok({ users: rows.results.map((r) => ({ ...userOut(r), createdAt: r.created_at })) });
@@ -218,7 +250,7 @@ async function adminSetStatus(c: Ctx) {
   }
   if (c.params.id === c.user!.id) throw new ApiError(400, 'SELF', 'เปลี่ยนสถานะบัญชีตัวเองไม่ได้');
   const res = await db('เปลี่ยนสถานะผู้ใช้', () =>
-    c.env.DB.prepare(`UPDATE users SET status = ?, updated_at = ? WHERE id = ?`).bind(status, nowThai(), c.params.id).run(),
+    c.env.DB.prepare(`UPDATE users SET status = ?, updated_at = ? WHERE id = ? AND is_bot = 0`).bind(status, nowThai(), c.params.id).run(),
   );
   if (res.meta.changes !== 1) throw new ApiError(404, 'USER_NOT_FOUND', 'ไม่พบผู้ใช้นี้');
   if (status === 'blocked') {
@@ -233,8 +265,8 @@ async function adminSetStatus(c: Ctx) {
 async function listUsers(c: Ctx) {
   const rows = await db('อ่านรายชื่อผู้ใช้', () =>
     c.env.DB.prepare(
-      `SELECT id, display_name, picture_url, status, role FROM users
-       WHERE status = 'active' AND id <> ? ORDER BY display_name`,
+      `SELECT id, display_name, picture_url, status, role, is_bot FROM users
+       WHERE status = 'active' AND id <> ? ORDER BY is_bot, display_name`,
     ).bind(c.user!.id).all<Parameters<typeof userOut>[0]>(),
   );
   return ok({ users: rows.results.map(userOut) });
@@ -738,6 +770,355 @@ async function pushTest(c: Ctx) {
   }
   if (r.sent === 0 && r.failed === 0) throw new ApiError(400, 'NO_DEVICE', 'ยังไม่มีเครื่องที่เปิดรับแจ้งเตือน');
   return ok(r);
+}
+
+// ---------- bots (แอดมิน) ----------
+type BotRow = {
+  id: string; display_name: string; picture_url: string | null; token_hint: string; webhook_url: string | null;
+  webhook_secret: string; enabled: number; created_at: string; last_delivery_at: string | null;
+  last_error: string | null; last_error_at: string | null; fail_count: number;
+};
+const botOut = (b: BotRow) => ({
+  id: b.id, name: b.display_name, tokenHint: b.token_hint, webhookUrl: b.webhook_url, webhookSecret: b.webhook_secret,
+  enabled: b.enabled === 1, createdAt: b.created_at, lastDeliveryAt: b.last_delivery_at, lastError: b.last_error,
+  lastErrorAt: b.last_error_at, failCount: b.fail_count,
+});
+
+function checkWebhookUrl(v: unknown): string | null {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v !== 'string' || v.length > 500) throw new ApiError(400, 'BAD_WEBHOOK', 'webhook URL ไม่ถูกต้อง');
+  let u: URL;
+  try {
+    u = new URL(v);
+  } catch {
+    throw new ApiError(400, 'BAD_WEBHOOK', 'webhook URL ไม่ถูกต้อง');
+  }
+  if (u.protocol !== 'https:') throw new ApiError(400, 'BAD_WEBHOOK', 'webhook URL ต้องขึ้นต้นด้วย https://');
+  return u.toString();
+}
+
+function checkBotName(v: unknown): string {
+  const name = typeof v === 'string' ? v.trim() : '';
+  if (!/^[\p{L}\p{M}\p{N}_ .-]{2,40}$/u.test(name)) {
+    throw new ApiError(400, 'BAD_NAME', 'ชื่อบอทต้องมี 2–40 ตัวอักษร (ตัวอักษร ตัวเลข _ . - เว้นวรรค)');
+  }
+  return name;
+}
+
+const newBotToken = () => `bot_${randomToken(32)}`;
+
+async function adminListBots(c: Ctx) {
+  const rows = await db('อ่านรายการบอท', () =>
+    c.env.DB.prepare(
+      `SELECT b.*, u.display_name, u.picture_url FROM bots b JOIN users u ON u.id = b.id ORDER BY b.created_at DESC`,
+    ).all<BotRow>(),
+  );
+  return ok({ bots: rows.results.map(botOut) });
+}
+
+async function adminCreateBot(c: Ctx) {
+  const body = await readJson<{ name?: unknown; webhookUrl?: unknown }>(c.req);
+  const name = checkBotName(body.name);
+  const webhookUrl = checkWebhookUrl(body.webhookUrl);
+  const id = newId();
+  const token = newBotToken();
+  const now = nowThai();
+  await db('สร้างบอท', async () =>
+    c.env.DB.batch([
+      c.env.DB.prepare(
+        `INSERT INTO users (id, line_user_id, display_name, picture_url, status, role, is_bot, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, 'active', 'member', 1, ?, ?)`,
+      ).bind(id, `bot:${id}`, name, now, now),
+      c.env.DB.prepare(
+        `INSERT INTO bots (id, token_hash, token_hint, webhook_url, webhook_secret, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(id, await sha256(token), token.slice(-4), webhookUrl, randomToken(24), c.user!.id, now),
+    ]),
+  );
+  // token เต็มแสดงครั้งเดียว — ระบบเก็บแค่ hash
+  return ok({ id, token }, 201);
+}
+
+async function adminUpdateBot(c: Ctx) {
+  const body = await readJson<{ name?: unknown; webhookUrl?: unknown; enabled?: unknown }>(c.req);
+  const stmts: D1PreparedStatement[] = [];
+  if (body.name !== undefined) {
+    stmts.push(c.env.DB.prepare(`UPDATE users SET display_name = ?, updated_at = ? WHERE id = ? AND is_bot = 1`)
+      .bind(checkBotName(body.name), nowThai(), c.params.id));
+  }
+  if (body.webhookUrl !== undefined) {
+    stmts.push(c.env.DB.prepare(`UPDATE bots SET webhook_url = ? WHERE id = ?`).bind(checkWebhookUrl(body.webhookUrl), c.params.id));
+  }
+  if (body.enabled !== undefined) {
+    if (typeof body.enabled !== 'boolean') throw new ApiError(400, 'BAD_ENABLED', 'ค่าเปิด/ปิดต้องเป็น true หรือ false');
+    stmts.push(c.env.DB.prepare(`UPDATE bots SET enabled = ? WHERE id = ?`).bind(body.enabled ? 1 : 0, c.params.id));
+  }
+  if (stmts.length === 0) throw new ApiError(400, 'NOTHING', 'ไม่มีข้อมูลที่จะแก้');
+  const exists = await db('หาบอท', () => c.env.DB.prepare(`SELECT 1 AS x FROM bots WHERE id = ?`).bind(c.params.id).first());
+  if (!exists) throw new ApiError(404, 'BOT_NOT_FOUND', 'ไม่พบบอทนี้');
+  await db('แก้ไขบอท', () => c.env.DB.batch(stmts));
+  return ok({ id: c.params.id });
+}
+
+async function adminRegenToken(c: Ctx) {
+  const token = newBotToken();
+  const res = await db('สร้าง token ใหม่', async () =>
+    c.env.DB.prepare(`UPDATE bots SET token_hash = ?, token_hint = ? WHERE id = ?`)
+      .bind(await sha256(token), token.slice(-4), c.params.id).run(),
+  );
+  if (res.meta.changes !== 1) throw new ApiError(404, 'BOT_NOT_FOUND', 'ไม่พบบอทนี้');
+  return ok({ id: c.params.id, token });
+}
+
+/** ส่งข้อความทดสอบไป webhook ของบอททันที แล้วบอกผลพร้อมเหตุผล */
+async function adminTestWebhook(c: Ctx) {
+  const r = await deliverWebhook(c.env, c.params.id, {
+    type: 'test', message: { body: `ทดสอบจากหน้าแอดมิน (${nowThai().slice(11, 16)} น.)` },
+  });
+  if (r === 'skip') throw new ApiError(400, 'NO_WEBHOOK', 'บอทนี้ยังไม่ได้ใส่ webhook URL หรือถูกปิดอยู่');
+  if (r === 'retry') {
+    const b = await db('อ่านผลส่ง', () => c.env.DB.prepare(`SELECT last_error FROM bots WHERE id = ?`).bind(c.params.id).first<{ last_error: string }>());
+    throw new ApiError(502, 'WEBHOOK_FAILED', `ส่งไม่สำเร็จ: ${b?.last_error ?? 'ไม่ทราบสาเหตุ'}`);
+  }
+  return ok({ delivered: true });
+}
+
+// ---------- bot-api ----------
+async function botMe(c: Ctx) {
+  return ok({ id: c.user!.id, name: c.user!.displayName });
+}
+
+async function botRooms(c: Ctx) {
+  const rows = await db('อ่านห้องของบอท', () =>
+    c.env.DB.prepare(
+      `SELECT r.id, r.type, r.title, m.role FROM room_members m JOIN rooms r ON r.id = m.room_id WHERE m.user_id = ? ORDER BY r.created_at`,
+    ).bind(c.user!.id).all<{ id: string; type: string; title: string | null; role: string }>(),
+  );
+  return ok({ rooms: rows.results });
+}
+
+/** ส่งข้อความเข้าห้องในนามผู้ส่ง ผ่าน Durable Object (ตรวจสิทธิ์ซ้ำในห้อง) → คืนผลหรือ ApiError พร้อมเหตุผล */
+async function postToRoom(env: Env, roomId: string, sender: User, p: { kind: string; body: string; extra?: unknown }) {
+  const res = await roomStub(env, roomId).fetch(new Request('https://room/post', {
+    method: 'POST',
+    headers: { 'X-Room-Id': roomId, 'content-type': 'application/json' },
+    body: JSON.stringify({ senderId: sender.id, senderName: sender.displayName, ...p }),
+  }));
+  const json = (await res.json()) as { ok: boolean; data?: { message: unknown; warnings: string[] }; error?: { code: string; message: string } };
+  if (!json.ok) throw new ApiError(res.status, json.error?.code ?? 'SEND_FAILED', json.error?.message ?? 'ส่งข้อความไม่สำเร็จ');
+  return json.data!;
+}
+
+async function botSendMessage(c: Ctx) {
+  const body = await readJson<{ roomId?: unknown; text?: unknown }>(c.req);
+  if (typeof body.roomId !== 'string') throw new ApiError(400, 'NO_ROOM', 'ต้องระบุ roomId');
+  if (typeof body.text !== 'string' || !body.text.trim()) throw new ApiError(400, 'EMPTY', 'ต้องระบุ text');
+  await requireMember(c.env, body.roomId, c.user!.id);
+  return ok(await postToRoom(c.env, body.roomId, c.user!, { kind: 'text', body: body.text }));
+}
+
+async function botSendForm(c: Ctx) {
+  const body = await readJson<{ roomId?: unknown; formId?: unknown; text?: unknown }>(c.req);
+  if (typeof body.roomId !== 'string') throw new ApiError(400, 'NO_ROOM', 'ต้องระบุ roomId');
+  if (typeof body.formId !== 'string') throw new ApiError(400, 'NO_FORM', 'ต้องระบุ formId');
+  await requireMember(c.env, body.roomId, c.user!.id);
+  return ok(await postToRoom(c.env, body.roomId, c.user!, {
+    kind: 'form', body: typeof body.text === 'string' ? body.text : '', extra: { formId: body.formId },
+  }));
+}
+
+async function botOrders(c: Ctx) {
+  const status = c.url.searchParams.get('status');
+  if (status && !(status in ORDER_STATUS_TH)) throw new ApiError(400, 'BAD_STATUS', 'สถานะไม่ถูกต้อง');
+  // บอทเห็นเฉพาะออเดอร์ของฟอร์มที่ผูกกับบอทตัวนี้
+  const rows = await db('อ่านออเดอร์', () =>
+    c.env.DB.prepare(
+      `${ORDER_SELECT} WHERE f.bot_id = ? ${status ? 'AND o.status = ?' : ''} ORDER BY o.id DESC LIMIT 200`,
+    ).bind(...(status ? [c.user!.id, status] : [c.user!.id])).all<OrderRow>(),
+  );
+  return ok({ orders: rows.results.map(orderOut) });
+}
+
+async function botSetOrderStatus(c: Ctx) {
+  const own = await db('ตรวจออเดอร์ของบอท', () =>
+    c.env.DB.prepare(`SELECT 1 AS x FROM orders o JOIN forms f ON f.id = o.form_id WHERE o.id = ? AND f.bot_id = ?`)
+      .bind(Number(c.params.orderId), c.user!.id).first(),
+  );
+  if (!own) throw new ApiError(404, 'ORDER_NOT_FOUND', 'ไม่พบออเดอร์นี้ หรือไม่ใช่ออเดอร์ของฟอร์มที่ผูกกับบอทนี้');
+  return setOrderStatus(c, c.user!);
+}
+
+// ---------- forms ----------
+type FormRow = {
+  id: string; title: string; description: string | null; fields_json: string; bot_id: string | null; active: number;
+  created_at: string; updated_at: string;
+};
+const formOut = (f: FormRow) => ({
+  id: f.id, title: f.title, description: f.description, fields: JSON.parse(f.fields_json) as FormField[],
+  botId: f.bot_id, active: f.active === 1, createdAt: f.created_at, updatedAt: f.updated_at,
+});
+
+async function adminListForms(c: Ctx) {
+  const rows = await db('อ่านรายการฟอร์ม', () => c.env.DB.prepare(`SELECT * FROM forms ORDER BY updated_at DESC`).all<FormRow>());
+  return ok({ forms: rows.results.map(formOut) });
+}
+
+/** สร้าง (ไม่มี formId) หรือแก้ฟอร์ม — ตรวจโครงด้วย checkFormDef ก่อนบันทึก */
+async function adminSaveForm(c: Ctx) {
+  const body = await readJson<{ title?: unknown; description?: unknown; fields?: unknown; botId?: unknown; active?: unknown }>(c.req);
+  const errs = checkFormDef(body.title, body.fields);
+  if (errs.length) throw new ApiError(400, 'BAD_FORM', errs.join(' · '));
+  const fields = (body.fields as FormField[]).map((f) => ({
+    id: f.id, label: f.label.trim(), type: f.type, required: f.required,
+    ...(f.type === 'select' ? { options: (f.options ?? []).map((o) => o.trim()).filter(Boolean) } : {}),
+    ...(f.type === 'number' && typeof f.min === 'number' ? { min: f.min } : {}),
+    ...(f.type === 'number' && typeof f.max === 'number' ? { max: f.max } : {}),
+  }));
+  const botId = typeof body.botId === 'string' && body.botId ? body.botId : null;
+  if (botId) {
+    const b = await db('ตรวจบอท', () => c.env.DB.prepare(`SELECT 1 AS x FROM bots WHERE id = ?`).bind(botId).first());
+    if (!b) throw new ApiError(400, 'BOT_NOT_FOUND', 'ไม่พบบอทที่เลือกให้รับออเดอร์');
+  }
+  const description = typeof body.description === 'string' ? body.description.trim().slice(0, 500) || null : null;
+  const active = body.active === false ? 0 : 1;
+  const now = nowThai();
+  if (c.params.formId) {
+    const res = await db('แก้ฟอร์ม', () =>
+      c.env.DB.prepare(`UPDATE forms SET title = ?, description = ?, fields_json = ?, bot_id = ?, active = ?, updated_at = ? WHERE id = ?`)
+        .bind((body.title as string).trim(), description, JSON.stringify(fields), botId, active, now, c.params.formId).run(),
+    );
+    if (res.meta.changes !== 1) throw new ApiError(404, 'FORM_NOT_FOUND', 'ไม่พบฟอร์มนี้');
+    return ok({ id: c.params.formId });
+  }
+  const id = newId();
+  await db('สร้างฟอร์ม', () =>
+    c.env.DB.prepare(
+      `INSERT INTO forms (id, title, description, fields_json, bot_id, active, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(id, (body.title as string).trim(), description, JSON.stringify(fields), botId, active, c.user!.id, now, now).run(),
+  );
+  return ok({ id }, 201);
+}
+
+async function loadForm(env: Env, formId: string) {
+  const f = await db('อ่านฟอร์ม', () => env.DB.prepare(`SELECT * FROM forms WHERE id = ?`).bind(formId).first<FormRow>());
+  if (!f) throw new ApiError(404, 'FORM_NOT_FOUND', 'ไม่พบฟอร์มนี้');
+  return formOut(f);
+}
+
+async function getForm(c: Ctx) {
+  const f = await loadForm(c.env, c.params.formId);
+  return ok({ form: { id: f.id, title: f.title, description: f.description, fields: f.fields, active: f.active } });
+}
+
+async function submitForm(c: Ctx) {
+  const body = await readJson<{ roomId?: unknown; values?: unknown }>(c.req);
+  if (typeof body.roomId !== 'string') throw new ApiError(400, 'NO_ROOM', 'ไม่ทราบว่ากรอกจากห้องไหน');
+  await requireMember(c.env, body.roomId, c.user!.id);
+  const form = await loadForm(c.env, c.params.formId);
+  if (!form.active) throw new ApiError(400, 'FORM_INACTIVE', 'ฟอร์มนี้ปิดรับแล้ว');
+  const { values, errors } = checkSubmission(form.fields, body.values);
+  if (Object.keys(errors).length) {
+    const msg = form.fields.filter((f) => errors[f.id]).map((f) => `${f.label}: ${errors[f.id]}`).join(' · ');
+    throw new ApiError(400, 'BAD_VALUES', msg);
+  }
+  const now = nowThai();
+  const snapshot = { title: form.title, fields: form.fields };
+  const row = await db('บันทึกออเดอร์', () =>
+    c.env.DB.prepare(
+      `INSERT INTO orders (form_id, room_id, user_id, data_json, form_snapshot, status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'new', ?, ?) RETURNING id`,
+    ).bind(form.id, body.roomId, c.user!.id, JSON.stringify(values), JSON.stringify(snapshot), now, now).first<{ id: number }>(),
+  );
+  if (!row) throw new ApiError(500, 'DB_FAILED', 'บันทึกออเดอร์ไม่สำเร็จ');
+  const warnings: string[] = [];
+  // ข้อความในห้องให้ร้านเห็น (ส่งในนามลูกค้า) — ไม่สำเร็จไม่ยกเลิกออเดอร์ แต่บอกให้รู้
+  try {
+    await postToRoom(c.env, body.roomId, c.user!, {
+      kind: 'text', body: `📝 ส่งออเดอร์ #${row.id} (${form.title}) แล้ว`, extra: { orderId: row.id },
+    });
+  } catch (err) {
+    console.error('โพสต์ข้อความแจ้งออเดอร์ในห้องไม่สำเร็จ', err);
+    warnings.push(`บันทึกออเดอร์แล้ว แต่โพสต์ข้อความแจ้งในห้องไม่สำเร็จ (${err instanceof Error ? err.message : 'ไม่ทราบสาเหตุ'})`);
+  }
+  if (form.botId) await queueOrderEvent(c.env, form.botId, 'order', row.id, warnings);
+  return ok({ orderId: row.id, warnings }, 201);
+}
+
+// ---------- orders ----------
+const ORDER_SELECT = `SELECT o.*, u.display_name AS user_name, r.title AS room_title, f.bot_id
+  FROM orders o JOIN users u ON u.id = o.user_id JOIN rooms r ON r.id = o.room_id JOIN forms f ON f.id = o.form_id`;
+type OrderRow = {
+  id: number; form_id: string; room_id: string; user_id: string; data_json: string; form_snapshot: string;
+  status: OrderStatus; status_note: string | null; created_at: string; updated_at: string; user_name: string; room_title: string | null;
+};
+function orderOut(o: OrderRow) {
+  const snap = JSON.parse(o.form_snapshot) as { title: string; fields: FormField[] };
+  const data = JSON.parse(o.data_json) as Record<string, string | number>;
+  return {
+    id: o.id, formId: o.form_id, formTitle: snap.title, roomId: o.room_id, roomTitle: o.room_title,
+    userId: o.user_id, userName: o.user_name, status: o.status, statusText: ORDER_STATUS_TH[o.status], statusNote: o.status_note,
+    items: snap.fields.map((f) => ({ id: f.id, label: f.label, value: data[f.id] ?? null })),
+    createdAt: o.created_at, updatedAt: o.updated_at,
+  };
+}
+
+async function listOrders(c: Ctx) {
+  const status = c.url.searchParams.get('status');
+  if (status && !(status in ORDER_STATUS_TH)) throw new ApiError(400, 'BAD_STATUS', 'สถานะไม่ถูกต้อง');
+  const isAdmin = c.user!.role === 'admin';
+  const where: string[] = [];
+  const binds: unknown[] = [];
+  if (!isAdmin) { where.push('o.user_id = ?'); binds.push(c.user!.id); } // ผู้ใช้ทั่วไปเห็นเฉพาะของตัวเอง
+  if (status) { where.push('o.status = ?'); binds.push(status); }
+  const rows = await db('อ่านออเดอร์', () =>
+    c.env.DB.prepare(`${ORDER_SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY o.id DESC LIMIT 300`)
+      .bind(...binds).all<OrderRow>(),
+  );
+  return ok({ orders: rows.results.map(orderOut), isAdmin });
+}
+
+async function adminSetOrderStatus(c: Ctx) {
+  return setOrderStatus(c, c.user!);
+}
+
+/** เปลี่ยนสถานะ → บันทึก → แจ้งลูกค้าในห้องเดิม (ลูกค้าได้แจ้งเตือนตามปกติ) → ส่งให้บอทของฟอร์ม */
+async function setOrderStatus(c: Ctx, actor: User) {
+  const body = await readJson<{ status?: unknown; note?: unknown }>(c.req);
+  if (typeof body.status !== 'string' || !(body.status in ORDER_STATUS_TH)) {
+    throw new ApiError(400, 'BAD_STATUS', 'สถานะต้องเป็น new, in_progress, done หรือ cancelled');
+  }
+  const status = body.status as OrderStatus;
+  const note = typeof body.note === 'string' ? body.note.trim().slice(0, 300) || null : null;
+  const id = Number(c.params.orderId);
+  const order = await db('อ่านออเดอร์', () =>
+    c.env.DB.prepare(`${ORDER_SELECT} WHERE o.id = ?`).bind(id).first<OrderRow & { bot_id: string | null }>(),
+  );
+  if (!order) throw new ApiError(404, 'ORDER_NOT_FOUND', 'ไม่พบออเดอร์นี้');
+  await db('เปลี่ยนสถานะออเดอร์', () =>
+    c.env.DB.prepare(`UPDATE orders SET status = ?, status_note = ?, updated_at = ? WHERE id = ?`).bind(status, note, nowThai(), id).run(),
+  );
+  const warnings: string[] = [];
+  try {
+    await postToRoom(c.env, order.room_id, actor, {
+      kind: 'text', body: `📦 ออเดอร์ #${id}: ${ORDER_STATUS_TH[status]}${note ? ` — ${note}` : ''}`, extra: { orderId: id },
+    });
+  } catch (err) {
+    console.error('แจ้งสถานะออเดอร์ในห้องไม่สำเร็จ', err);
+    warnings.push(`เปลี่ยนสถานะแล้ว แต่แจ้งลูกค้าในห้องไม่สำเร็จ (${err instanceof Error ? err.message : 'ไม่ทราบสาเหตุ'})`);
+  }
+  if (order.bot_id && !actor.isBot) await queueOrderEvent(c.env, order.bot_id, 'order_status', id, warnings);
+  return ok({ id, status, warnings });
+}
+
+/** ส่งเหตุการณ์ออเดอร์ให้บอทของฟอร์ม (ผ่าน Queue → webhook) */
+async function queueOrderEvent(env: Env, botId: string, type: 'order' | 'order_status', orderId: number, warnings: string[]) {
+  try {
+    const o = await env.DB.prepare(`${ORDER_SELECT} WHERE o.id = ?`).bind(orderId).first<OrderRow>();
+    if (!o) return;
+    await env.PUSH_QUEUE.send({ type: 'webhook', botId, update: { type, order: orderOut(o) } });
+  } catch (err) {
+    console.error('ส่งออเดอร์ให้บอทไม่สำเร็จ', err);
+    warnings.push('บันทึกแล้ว แต่ส่งข้อมูลออเดอร์ให้บอทไม่สำเร็จ');
+  }
 }
 
 // =====================================================================

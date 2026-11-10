@@ -1,0 +1,136 @@
+{
+  "name": "แชท: โพสต์ข่าวจาก RSS ลงชาเนล",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "ทุก 1 ชั่วโมง",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://example.com/feed.xml",
+        "options": {}
+      },
+      "name": "อ่าน RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "removeItemsRepeatedInPreviousExecutions",
+        "dedupeValue": "={{ $json.link }}",
+        "options": {}
+      },
+      "name": "ตัดข่าวที่โพสต์แล้ว",
+      "type": "n8n-nodes-base.removeDuplicates",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "maxItems": 5
+      },
+      "name": "ไม่เกิน 5 ข่าวต่อรอบ",
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://noti.kalon-ai.app/api/bot/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_BOT_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ roomId: 'YOUR_CHANNEL_ROOM_ID', text: '📰 ' + $json.title + '\\n' + $json.link }) }}",
+        "options": {}
+      },
+      "name": "โพสต์ลงชาเนล",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "ทุก 1 ชั่วโมง": {
+      "main": [
+        [
+          {
+            "node": "อ่าน RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "อ่าน RSS": {
+      "main": [
+        [
+          {
+            "node": "ตัดข่าวที่โพสต์แล้ว",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ตัดข่าวที่โพสต์แล้ว": {
+      "main": [
+        [
+          {
+            "node": "ไม่เกิน 5 ข่าวต่อรอบ",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ไม่เกิน 5 ข่าวต่อรอบ": {
+      "main": [
+        [
+          {
+            "node": "โพสต์ลงชาเนล",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {}
+}

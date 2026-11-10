@@ -1,0 +1,155 @@
+{
+  "name": "แชท: บอท AI ตอบคำถาม (Claude)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat-ai-bot",
+        "options": {}
+      },
+      "name": "รับจากแชท",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "chat-ai-bot"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "secret",
+              "leftValue": "={{ $json.headers['x-bot-secret'] }}",
+              "rightValue": "YOUR_WEBHOOK_SECRET",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "type",
+              "leftValue": "={{ $json.body.type }}",
+              "rightValue": "message",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "ตรวจ secret + ชนิด",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "YOUR_ANTHROPIC_API_KEY"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'claude-sonnet-5-5', max_tokens: 1024, system: 'คุณคือผู้ช่วยของร้าน ตอบเป็นภาษาไทย สั้น กระชับ สุภาพ ถ้าไม่แน่ใจให้บอกว่าไม่แน่ใจและแนะนำให้ติดต่อแอดมิน', messages: [{ role: 'user', content: $json.body.message.body.replace(/^\\/\\S+\\s*/, '') }] }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "name": "ถาม Claude",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://noti.kalon-ai.app/api/bot/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_BOT_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ roomId: $('รับจากแชท').item.json.body.room.id, text: $json.content[0].text }) }}",
+        "options": {}
+      },
+      "name": "ตอบกลับในห้อง",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        -100
+      ]
+    }
+  ],
+  "connections": {
+    "รับจากแชท": {
+      "main": [
+        [
+          {
+            "node": "ตรวจ secret + ชนิด",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ตรวจ secret + ชนิด": {
+      "main": [
+        [
+          {
+            "node": "ถาม Claude",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "ถาม Claude": {
+      "main": [
+        [
+          {
+            "node": "ตอบกลับในห้อง",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {}
+}

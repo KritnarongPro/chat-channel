@@ -21,6 +21,9 @@ export const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'
 /** ชนิดเสียงที่รับ (ตัด ;codecs=... ออกก่อนเทียบ) */
 export const VOICE_MIMES = ['audio/mp4', 'audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/aac'];
 
+/** ข้อมูลเสริมของข้อความ (เฟส 4) — การ์ดฟอร์ม: { formId, formTitle } */
+export interface MessageExtra { formId?: string; formTitle?: string; orderId?: number }
+
 export interface FileInfo {
   id: string;
   name: string;
@@ -38,15 +41,16 @@ export interface ChatMessage {
   id: string;           // ไอดีที่หน้าเว็บสร้าง ใช้กันส่งซ้ำ
   senderId: string;
   senderName: string;
-  kind: 'text' | FileKind;
+  kind: 'text' | FileKind | 'form';  // form = การ์ดฟอร์มรับออเดอร์ (เฟส 4)
   body: string;         // ข้อความ หรือคำบรรยายใต้ไฟล์ (ว่างได้ถ้าเป็นไฟล์)
   file: FileInfo | null;
+  extra: MessageExtra | null;
   createdAt: string;    // เวลาไทย ISO
 }
 
 // ---------- หน้าเว็บ → ห้อง ----------
 export type ClientFrame =
-  | { type: 'send'; clientId: string; body: string; kind?: 'text' | FileKind; fileId?: string }
+  | { type: 'send'; clientId: string; body: string; kind?: 'text' | FileKind | 'form'; fileId?: string; extra?: MessageExtra }
   | { type: 'sync'; afterSeq: number }
   | { type: 'read'; seq: number }
   | { type: 'presence'; visible: boolean } // เฟส 3: หน้าจอห้องนี้เปิดอยู่ไหม (เปิดอยู่ = ไม่ส่งแจ้งเตือน)

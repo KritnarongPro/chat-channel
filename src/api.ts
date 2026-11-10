@@ -91,6 +91,7 @@ export interface User {
   pictureUrl: string | null;
   status: 'pending' | 'active' | 'blocked';
   role: 'member' | 'admin';
+  isBot: boolean;   // เฟส 4
 }
 
 export interface Me { user: User; appName: string; hasAdmin: boolean }
@@ -116,6 +117,21 @@ export interface Room {
 export interface RoomMember { id: string; displayName: string; pictureUrl: string | null; role: string }
 
 export type { ChatMessage };
+
+// ---------- เฟส 4: บอท / ฟอร์ม / ออเดอร์ ----------
+export interface Bot {
+  id: string; name: string; tokenHint: string; webhookUrl: string | null; webhookSecret: string; enabled: boolean;
+  createdAt: string; lastDeliveryAt: string | null; lastError: string | null; lastErrorAt: string | null; failCount: number;
+}
+export interface FormInfo {
+  id: string; title: string; description: string | null; fields: import('../shared/forms').FormField[];
+  botId: string | null; active: boolean; createdAt: string; updatedAt: string;
+}
+export interface Order {
+  id: number; formId: string; formTitle: string; roomId: string; roomTitle: string | null; userId: string; userName: string;
+  status: import('../shared/forms').OrderStatus; statusText: string; statusNote: string | null;
+  items: { id: string; label: string; value: string | number | null }[]; createdAt: string; updatedAt: string;
+}
 
 // ---------------------------------------------------------------------
 // ข้อความ error ตอนล็อกอิน (worker ส่งกลับมาเป็น ?login_error=รหัส)

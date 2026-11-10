@@ -7,6 +7,7 @@
 //   2. รหัสสุ่ม / hash
 //   3. Cookie + session
 //   4. requireUser — helper เดียวสำหรับตรวจล็อกอิน/สิทธิ์ทุก endpoint
+//   5. requireBot — ตรวจ token ของบอท (Bot API, เฟส 4)
 // =====================================================================
 
 import { thaiAfter, nowThai } from '../shared/time';
@@ -120,15 +121,18 @@ export interface User {
   pictureUrl: string | null;
   status: 'pending' | 'active' | 'blocked';
   role: 'member' | 'admin';
+  isBot: boolean;
 }
 
-type UserRow = { id: string; display_name: string; picture_url: string | null; status: User['status']; role: User['role'] };
+type UserRow = {
+  id: string; display_name: string; picture_url: string | null; status: User['status']; role: User['role']; is_bot?: number;
+};
 export const userOut = (r: UserRow): User => ({
-  id: r.id, displayName: r.display_name, pictureUrl: r.picture_url, status: r.status, role: r.role,
+  id: r.id, displayName: r.display_name, pictureUrl: r.picture_url, status: r.status, role: r.role, isBot: r.is_bot === 1,
 });
 
-/** ระดับที่ต้องการ: any = ล็อกอินแล้ว (รออนุมัติก็ได้) · active = อนุมัติแล้ว · admin = แอดมิน */
-export type Need = 'any' | 'active' | 'admin';
+/** ระดับที่ต้องการ: any = ล็อกอินแล้ว (รออนุมัติก็ได้) · active = อนุมัติแล้ว · admin = แอดมิน · bot = token ของบอท */
+export type Need = 'any' | 'active' | 'admin' | 'bot';
 
 export async function requireUser(req: Request, env: Env, need: Need): Promise<User> {
   const token = readCookie(req, SESSION_COOKIE);
@@ -136,9 +140,9 @@ export async function requireUser(req: Request, env: Env, need: Need): Promise<U
   const tokenHash = await sha256(token);
   const row = await db('ตรวจ session', () =>
     env.DB.prepare(
-      `SELECT u.id, u.display_name, u.picture_url, u.status, u.role
+      `SELECT u.id, u.display_name, u.picture_url, u.status, u.role, u.is_bot
        FROM sessions s JOIN users u ON u.id = s.user_id
-       WHERE s.token_hash = ? AND s.expires_at > ?`,
+       WHERE s.token_hash = ? AND s.expires_at > ? AND u.is_bot = 0`,
     ).bind(tokenHash, nowThai()).first<UserRow>(),
   );
   if (!row) throw new ApiError(401, 'SESSION_EXPIRED', 'การเข้าสู่ระบบหมดอายุ กรุณาเข้าสู่ระบบใหม่');
@@ -149,4 +153,22 @@ export async function requireUser(req: Request, env: Env, need: Need): Promise<U
   }
   if (need === 'admin' && user.role !== 'admin') throw new ApiError(403, 'NOT_ADMIN', 'ต้องเป็นแอดมินเท่านั้น');
   return user;
+}
+
+// =====================================================================
+// 5. requireBot — หัว Authorization: Bearer <token ของบอท>
+// =====================================================================
+export async function requireBot(req: Request, env: Env): Promise<User> {
+  const auth = req.headers.get('Authorization') || '';
+  const m = /^Bearer\s+(\S+)$/.exec(auth);
+  if (!m) throw new ApiError(401, 'NO_BOT_TOKEN', 'ต้องส่งหัว Authorization: Bearer <token ของบอท>');
+  const row = await db('ตรวจ token บอท', async () =>
+    env.DB.prepare(
+      `SELECT u.id, u.display_name, u.picture_url, u.status, u.role, u.is_bot, b.enabled
+       FROM bots b JOIN users u ON u.id = b.id WHERE b.token_hash = ?`,
+    ).bind(await sha256(m[1])).first<UserRow & { enabled: number }>(),
+  );
+  if (!row) throw new ApiError(401, 'BAD_BOT_TOKEN', 'token ของบอทไม่ถูกต้อง (อาจถูกสร้างใหม่แล้ว)');
+  if (!row.enabled) throw new ApiError(403, 'BOT_DISABLED', 'บอทนี้ถูกปิดใช้งานอยู่');
+  return userOut(row);
 }

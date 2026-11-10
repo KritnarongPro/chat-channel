@@ -4,15 +4,41 @@
 // =====================================================================
 
 import { useState } from 'react';
+import { Link } from 'react-router';
 import type { ChatMessage } from '../shared/protocol';
 import { FILE_RETENTION_DAYS } from '../shared/protocol';
 import { nowThai } from '../shared/time';
 import { formatDuration, formatSize } from './media';
 
-export default function MessageContent({ m }: { m: ChatMessage }) {
+export default function MessageContent({ m, roomId }: { m: ChatMessage; roomId: string }) {
   const [broken, setBroken] = useState(false);
   const f = m.file;
   const caption = m.body ? <div className="bubble-body">{m.body}</div> : null;
+
+  // ---------- เฟส 4: การ์ดฟอร์ม → กดเปิดหน้ากรอก ----------
+  if (m.kind === 'form') {
+    return (
+      <>
+        {caption}
+        <div className="form-card">
+          <div className="small muted">📝 ฟอร์ม</div>
+          <b>{m.extra?.formTitle ?? 'ฟอร์ม'}</b>
+          {m.extra?.formId
+            ? <Link className="btn btn-small" to={`/form/${encodeURIComponent(m.extra.formId)}?room=${encodeURIComponent(roomId)}`}>กรอกฟอร์ม</Link>
+            : <span className="small error-text">การ์ดฟอร์มนี้ไม่มีรหัสฟอร์ม</span>}
+        </div>
+      </>
+    );
+  }
+  // ข้อความแจ้งออเดอร์ → ลิงก์ไปหน้าออเดอร์
+  if (m.kind === 'text' && m.extra?.orderId) {
+    return (
+      <>
+        <div className="bubble-body">{m.body}</div>
+        <Link className="small" to="/orders">ดูออเดอร์</Link>
+      </>
+    );
+  }
 
   if (m.kind === 'text' || !f) return <div className="bubble-body">{m.body}</div>;
 

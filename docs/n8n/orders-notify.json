@@ -1,0 +1,112 @@
+{
+  "name": "แชท: แจ้งออเดอร์ใหม่เข้ากลุ่มร้าน",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chat-orders",
+        "options": {}
+      },
+      "name": "รับจากแชท",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "chat-orders"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "secret",
+              "leftValue": "={{ $json.headers['x-bot-secret'] }}",
+              "rightValue": "YOUR_WEBHOOK_SECRET",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "type",
+              "leftValue": "={{ $json.body.type }}",
+              "rightValue": "order",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "ตรวจ secret + ชนิด",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://noti.kalon-ai.app/api/bot/sendMessage",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer YOUR_BOT_TOKEN"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ roomId: 'YOUR_SHOP_GROUP_ROOM_ID', text: '🛒 ออเดอร์ใหม่ #' + $json.body.order.id + ' จาก ' + $json.body.order.userName + '\\n' + $json.body.order.items.map(i => i.label + ': ' + (i.value ?? '-')).join('\\n') }) }}",
+        "options": {}
+      },
+      "name": "แจ้งในกลุ่มร้าน",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        -100
+      ]
+    }
+  ],
+  "connections": {
+    "รับจากแชท": {
+      "main": [
+        [
+          {
+            "node": "ตรวจ secret + ชนิด",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ตรวจ secret + ชนิด": {
+      "main": [
+        [
+          {
+            "node": "แจ้งในกลุ่มร้าน",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {}
+}
