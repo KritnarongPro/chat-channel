@@ -71,8 +71,8 @@ export default function NewChatPage() {
           <li key={u.id}>
             <label className="user-item">
               <input type="checkbox" checked={picked.has(u.id)} onChange={() => toggle(u.id)} />
-              <Avatar name={u.displayName} url={u.pictureUrl} size={36} />
-              <span>{u.displayName}</span>
+              <Avatar name={u.displayName} url={u.pictureUrl} size={36} bot={u.isBot} />
+              <span>{u.displayName}{u.isBot && <span className="small muted"> · บอท</span>}</span>
             </label>
           </li>
         ))}

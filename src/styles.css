@@ -130,3 +130,25 @@ input, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--borde
 .plain-link { color: inherit; text-decoration: none; }
 .readonly-note { padding: 12px; text-align: center; color: var(--muted); font-size: 14px; border-top: 1px solid var(--border); background: #fff; }
 .push-right { margin-left: auto; }
+
+/* ---------- บอท / ฟอร์ม / ออเดอร์ (เฟส 4) ---------- */
+select { font: inherit; width: 100%; padding: 9px 10px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.form-card { display: flex; flex-direction: column; gap: 6px; padding: 10px; margin: 4px 0; border: 1px solid var(--border); border-radius: 12px; background: #fff; min-width: 200px; }
+.chips { display: flex; gap: 6px; padding: 8px 12px; overflow-x: auto; }
+.chip { border: 1px solid var(--border); background: #fff; border-radius: 999px; padding: 4px 12px; font-size: 14px; white-space: nowrap; text-decoration: none; color: inherit; cursor: pointer; }
+.chip.on { background: var(--blue); color: #fff; border-color: var(--blue); }
+.order-card { margin: 8px 12px; padding: 12px; border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; gap: 6px; }
+.order-items { width: 100%; border-collapse: collapse; font-size: 14px; }
+.order-items td { padding: 3px 0; border-bottom: 1px dashed var(--border); vertical-align: top; }
+.order-items td:first-child { color: var(--muted); width: 40%; padding-right: 8px; }
+.status { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--bg); }
+.status-new { background: var(--blue-soft); color: var(--blue); }
+.status-in_progress { background: var(--amber-soft); color: #7a5300; }
+.status-done { background: var(--green-soft); color: #1b6b35; }
+.status-cancelled { background: var(--red-soft); color: var(--red); }
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field-editor { margin: 6px 12px; padding: 10px; border: 1px solid var(--border); border-radius: 12px; display: flex; flex-direction: column; gap: 6px; }
+.bot-item { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+.row-actions.wrap { flex-wrap: wrap; }
+.token { display: block; word-break: break-all; background: #fff; padding: 8px; border-radius: 8px; font-size: 13px; }
+.pad { padding: 12px 14px; }

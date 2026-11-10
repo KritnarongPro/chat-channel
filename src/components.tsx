@@ -5,8 +5,9 @@
 import { ReactNode } from 'react';
 import { Link } from 'react-router';
 
-export function Avatar({ name, url, size = 40 }: { name: string; url?: string | null; size?: number }) {
+export function Avatar({ name, url, size = 40, bot = false }: { name: string; url?: string | null; size?: number; bot?: boolean }) {
   const style = { width: size, height: size, fontSize: size * 0.42 };
+  if (bot) return <span className="avatar avatar-text" style={style} aria-label="บอท">🤖</span>;
   if (url) return <img className="avatar" src={url} alt="" style={style} referrerPolicy="no-referrer" />;
   return <span className="avatar avatar-text" style={style} aria-hidden="true">{name.slice(0, 1)}</span>;
 }

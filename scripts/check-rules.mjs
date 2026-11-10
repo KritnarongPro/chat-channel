@@ -66,6 +66,13 @@ for (const f of migs) {
   }
 }
 
+// ---------- CORE-05 ตรวจตัวอักษรด้วย \p{L} ต้องมี \p{M} ด้วย (สระ/วรรณยุกต์ไทยเป็น \p{M} — ไม่งั้นชื่อไทยไม่ผ่าน) ----------
+for (const f of codeFiles) {
+  read(f).split('\n').forEach((line, i) => {
+    if (/\\p\{L\}/.test(line) && !/\\p\{M\}/.test(line)) fail('CORE-05', `${f}:${i + 1} ใช้ \\p{L} แต่ไม่มี \\p{M} — ชื่อภาษาไทยที่มีสระบน/ล่าง/วรรณยุกต์จะไม่ผ่าน`);
+  });
+}
+
 // ---------- CORE-04 ต้องบอกวิธี deploy ไว้ใน README ----------
 if (!/GitHub Actions/.test(read('README.md'))) fail('CORE-04', 'README.md ต้องบอกวิธี deploy (GitHub Actions)');
 
@@ -84,7 +91,7 @@ if (!codeVer || !docVer || codeVer[1] !== docVer[1]) {
 // ---------- BUGS-02 endpoint ต้องอยู่ในตาราง routes และระบุสิทธิ์ (need) ทุกตัว ----------
 const index = read(join('worker', 'index.ts'));
 for (const m of index.matchAll(/\{ method: '[A-Z]+',\s*pattern: '([^']+)',([^}]*)\}/g)) {
-  if (!/need: '(public|any|active|admin)'/.test(m[2])) fail('BUGS-02', `route ${m[1]} ไม่ได้ระบุ need (สิทธิ์)`);
+  if (!/need: '(public|any|active|admin|bot)'/.test(m[2])) fail('BUGS-02', `route ${m[1]} ไม่ได้ระบุ need (สิทธิ์)`);
 }
 
 // ---------- BUGS-03 ตรวจ Origin ต้องยอมรับโดเมนเดียวกับที่เรียกด้วย (ไม่งั้นทดสอบในเครื่องแล้ว WebSocket โดน 403) ----------
@@ -113,10 +120,16 @@ if (!/requirePoster\(room\.type, role\)/.test(index)) fail('BUGS-05', 'uploadFil
   }
 }
 
+// ---------- BUGS-07 บอทห้ามได้รับข้อความของบอทด้วยกัน (กันบอทตอบกันเองวนไม่จบ) ----------
+if (!/if \(!room\.senderIsBot\) await this\.queueBots/.test(room)) fail('BUGS-07', 'worker/room.ts ต้องไม่ส่งข้อความของบอทไปให้บอท (senderIsBot)');
+
+// ---------- BUGS-08 ฟอร์ม: worker ต้องตรวจคำตอบซ้ำเอง (ห้ามเชื่อหน้าเว็บ) ----------
+if (!/checkSubmission\(form\.fields, body\.values\)/.test(index)) fail('BUGS-08', 'submitForm ต้องเรียก checkSubmission ก่อนบันทึกออเดอร์');
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..04, BUGS-01..06)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..05, BUGS-01..08)');

@@ -43,6 +43,7 @@ export default function ChatListPage() {
         right={
           <>
             <Link to="/channels" className="btn btn-small btn-ghost">ชาเนล</Link>
+            <Link to="/orders" className="btn btn-small btn-ghost" aria-label="ออเดอร์">📦</Link>
             <Link to="/settings" className="btn btn-small btn-ghost" aria-label="ตั้งค่าแจ้งเตือน">🔔</Link>
             {me.user.role === 'admin' && <Link to="/admin" className="btn btn-small btn-ghost">แอดมิน</Link>}
             <button className="btn btn-small btn-ghost" onClick={() => void logout()}>ออก</button>
