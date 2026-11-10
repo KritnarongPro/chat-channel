@@ -92,10 +92,19 @@ if (!/origin !== new URL\(req\.url\)\.origin/.test(index)) {
   fail('BUGS-03', 'checkOrigin ใน worker/index.ts ต้องเทียบกับ new URL(req.url).origin ด้วย ไม่ใช่ APP_URL อย่างเดียว');
 }
 
+// ---------- BUGS-04 ไฟล์ที่ผู้ใช้อัปต้องไม่ถูกเปิดเป็นหน้าเว็บบนโดเมนเรา (กันไฟล์ HTML/SVG ฝังสคริปต์) ----------
+{
+  const dl = index.slice(index.indexOf('async function downloadFile'));
+  if (!/'X-Content-Type-Options', 'nosniff'/.test(dl) || !/'Content-Type', 'application\/octet-stream'/.test(dl) || !/attachment;/.test(dl)) {
+    fail('BUGS-04', 'downloadFile ต้องตั้ง nosniff และส่งไฟล์ชนิด file เป็น application/octet-stream + attachment');
+  }
+  if (/image\/svg/.test(read(join('shared', 'protocol.ts')))) fail('BUGS-04', 'ห้ามรับ SVG เป็นรูป (IMAGE_MIMES)');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..04, BUGS-01..03)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..04, BUGS-01..04)');

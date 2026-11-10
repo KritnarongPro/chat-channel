@@ -41,6 +41,44 @@ export const api = {
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body ?? {}),
 };
 
+/**
+ * อัปโหลดไฟล์ดิบเข้าห้อง (ใช้ XHR เพื่อดูความคืบหน้า) → คืน fileId
+ * ไม่สำเร็จ → ApiError พร้อมเหตุผลภาษาไทย
+ */
+export function uploadFile(
+  roomId: string,
+  blob: Blob,
+  meta: { kind: 'image' | 'file' | 'voice'; name: string; mime: string; width?: number; height?: number; durationMs?: number },
+  onProgress: (pct: number) => void,
+): Promise<{ fileId: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/rooms/${encodeURIComponent(roomId)}/files`);
+    xhr.setRequestHeader('Content-Type', meta.mime || 'application/octet-stream');
+    xhr.setRequestHeader('X-File-Kind', meta.kind);
+    xhr.setRequestHeader('X-File-Name', encodeURIComponent(meta.name));
+    if (meta.width) xhr.setRequestHeader('X-Width', String(Math.round(meta.width)));
+    if (meta.height) xhr.setRequestHeader('X-Height', String(Math.round(meta.height)));
+    if (meta.durationMs) xhr.setRequestHeader('X-Duration-Ms', String(Math.round(meta.durationMs)));
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100)); };
+    xhr.onerror = () => reject(new ApiError(0, 'NETWORK', 'อัปโหลดไม่สำเร็จ — เน็ตหลุดระหว่างอัป'));
+    xhr.ontimeout = () => reject(new ApiError(0, 'TIMEOUT', 'อัปโหลดนานเกินไป — ลองใหม่เมื่อเน็ตดีขึ้น'));
+    xhr.onload = () => {
+      let json: { ok: boolean; data?: { fileId: string }; error?: { code: string; message: string } };
+      try {
+        json = JSON.parse(xhr.responseText);
+      } catch {
+        reject(new ApiError(xhr.status, 'BAD_RESPONSE', `เซิร์ฟเวอร์ตอบกลับผิดรูปแบบ (HTTP ${xhr.status})`));
+        return;
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && json.ok && json.data) resolve(json.data);
+      else reject(new ApiError(xhr.status, json.error?.code ?? 'UNKNOWN', json.error?.message ?? `อัปโหลดไม่สำเร็จ (HTTP ${xhr.status})`));
+    };
+    xhr.timeout = 10 * 60_000;
+    xhr.send(blob);
+  });
+}
+
 export const errMsg = (e: unknown) =>
   e instanceof ApiError ? e.message : e instanceof Error ? e.message : 'เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ';
 

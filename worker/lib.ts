@@ -17,6 +17,7 @@ import { thaiAfter, nowThai } from '../shared/time';
 export interface Env {
   DB: D1Database;
   ROOM: DurableObjectNamespace;
+  FILES: R2Bucket;
   ASSETS: Fetcher;
   APP_URL: string;
   APP_NAME: string;
