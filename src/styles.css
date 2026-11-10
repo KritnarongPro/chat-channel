@@ -1,0 +1,97 @@
+/* =====================================================================
+   styles.css — หน้าตาแอปแชท (มือถือก่อน)
+   ===================================================================== */
+
+/* ---------- พื้นฐาน ---------- */
+:root {
+  --blue: #2a6fdb; --blue-soft: #e8f0fd; --line: #06c755;
+  --text: #1c1e21; --muted: #6b7280; --border: #e5e7eb; --bg: #f5f6f8;
+  --red: #c62828; --red-soft: #fdecea; --amber-soft: #fff6e0; --green-soft: #e7f6ec;
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { font-family: 'IBM Plex Sans Thai', system-ui, sans-serif; color: var(--text); background: var(--bg); font-size: 16px; }
+button, input, textarea { font: inherit; }
+input, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.grow { flex: 1; min-width: 0; }
+.center { padding: 32px 20px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+.error-text { color: var(--red); margin: 4px 0; }
+.card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 16px; width: 100%; max-width: 360px; display: flex; flex-direction: column; gap: 10px; }
+
+/* ---------- ปุ่ม ---------- */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 16px; border: 0; border-radius: 10px; background: var(--blue); color: #fff; text-decoration: none; cursor: pointer; }
+.btn:disabled { opacity: .5; cursor: default; }
+.btn-ghost { background: transparent; color: var(--blue); }
+.btn-danger { background: var(--red); }
+.btn-small { padding: 6px 10px; font-size: 14px; }
+.btn-block { width: 100%; }
+.btn-line { background: var(--line); font-size: 18px; padding: 12px 24px; }
+.link { background: none; border: 0; color: var(--blue); cursor: pointer; padding: 0 4px; text-decoration: underline; }
+
+/* ---------- แจ้งเตือน ---------- */
+.notices { position: fixed; top: 8px; left: 8px; right: 8px; z-index: 50; display: flex; flex-direction: column; gap: 6px; pointer-events: none; }
+.notice { pointer-events: auto; display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 10px 12px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,.12); max-width: 560px; margin: 0 auto; width: 100%; }
+.notice button { background: none; border: 0; font-size: 20px; line-height: 1; cursor: pointer; }
+.notice-error { background: var(--red-soft); color: var(--red); }
+.notice-warning { background: var(--amber-soft); color: #7a5300; }
+.notice-success { background: var(--green-soft); color: #1b6b35; }
+.banner { padding: 8px 12px; font-size: 14px; }
+.banner-error { background: var(--red-soft); color: var(--red); }
+.banner-warning { background: var(--amber-soft); color: #7a5300; }
+
+/* ---------- โครงหน้า ---------- */
+.page { max-width: 720px; margin: 0 auto; min-height: 100%; background: #fff; display: flex; flex-direction: column; position: relative; }
+.topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 8px; padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top)); background: #fff; border-bottom: 1px solid var(--border); min-height: 52px; }
+.topbar-back { font-size: 30px; line-height: 1; color: var(--blue); text-decoration: none; width: 28px; }
+.topbar-gap { width: 4px; }
+.topbar-title { flex: 1; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar-right { display: flex; gap: 4px; }
+.topbar-room { background: none; border: 0; padding: 0; text-align: left; display: flex; flex-direction: column; font-weight: 600; color: inherit; max-width: 100%; }
+.topbar-room span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.avatar { border-radius: 50%; object-fit: cover; flex: none; }
+.avatar-text { display: inline-flex; align-items: center; justify-content: center; background: var(--blue-soft); color: var(--blue); font-weight: 600; }
+
+/* ---------- รายการแชท ---------- */
+.room-list, .user-list { list-style: none; margin: 0; padding: 0; }
+.room-item { display: flex; gap: 12px; padding: 10px 14px; text-decoration: none; color: inherit; border-bottom: 1px solid var(--border); }
+.room-main { flex: 1; min-width: 0; }
+.room-top, .room-bottom { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.room-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-time { font-size: 12px; color: var(--muted); flex: none; }
+.room-preview { color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.badge { background: var(--blue); color: #fff; border-radius: 999px; font-size: 12px; padding: 1px 7px; flex: none; }
+.fab { position: fixed; right: 20px; bottom: calc(20px + env(safe-area-inset-bottom)); width: 56px; height: 56px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 32px; display: flex; align-items: center; justify-content: center; text-decoration: none; box-shadow: 0 4px 12px rgba(0,0,0,.2); }
+
+/* ---------- เลือกผู้ใช้ ---------- */
+.form-block { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+.user-item { display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.user-item input[type=checkbox] { width: 20px; height: 20px; flex: none; }
+.admin-user { cursor: default; }
+.row-actions { display: flex; gap: 6px; flex: none; }
+.bottom-bar { position: sticky; bottom: 0; background: #fff; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); margin-top: auto; }
+
+/* ---------- ห้องแชท ---------- */
+.chat-page { height: 100%; }
+.messages { flex: 1; overflow-y: auto; padding: 10px 10px 4px; background: var(--bg); }
+.date-sep { text-align: center; font-size: 12px; color: var(--muted); margin: 10px 0; }
+.bubble-row { display: flex; margin: 3px 0; }
+.bubble-row.mine { justify-content: flex-end; }
+.bubble { max-width: 78%; background: #fff; border-radius: 14px; padding: 7px 11px; box-shadow: 0 1px 1px rgba(0,0,0,.05); }
+.mine .bubble { background: var(--blue-soft); }
+.bubble-name { font-size: 12px; color: var(--blue); font-weight: 600; }
+.bubble-body { white-space: pre-wrap; word-break: break-word; }
+.bubble-meta { font-size: 11px; color: var(--muted); text-align: right; }
+.bubble-sending { opacity: .7; }
+.bubble-failed { background: var(--red-soft) !important; }
+.bubble-fail { font-size: 12px; color: var(--red); margin-top: 4px; }
+.composer { border-top: 1px solid var(--border); padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); background: #fff; }
+.composer-row { display: flex; gap: 8px; align-items: flex-end; }
+.composer textarea { resize: none; max-height: 120px; }
+
+/* ---------- แผ่นสมาชิก ---------- */
+.sheet-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.35); z-index: 40; display: flex; align-items: flex-end; justify-content: center; }
+.sheet { background: #fff; width: 100%; max-width: 720px; max-height: 80vh; overflow-y: auto; border-radius: 16px 16px 0 0; padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
+.sheet-head { display: flex; justify-content: space-between; align-items: center; padding: 4px; }
+.login h1 { margin-top: 15vh; }
