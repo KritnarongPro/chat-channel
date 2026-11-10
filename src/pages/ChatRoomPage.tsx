@@ -1,0 +1,267 @@
+// =====================================================================
+// ChatRoomPage.tsx — ห้องแชท: ข้อความเรียลไทม์ + สถานะส่ง/ส่งไม่สำเร็จ + สถานะการเชื่อมต่อ
+// กลุ่ม: แตะหัวห้องเพื่อดู/เพิ่มสมาชิก
+// =====================================================================
+
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useParams } from 'react-router';
+import { thaiClock, thaiDate } from '../../shared/time';
+import { MAX_MESSAGE_CHARS } from '../../shared/protocol';
+import { Room, RoomMember, User, api, errMsg } from '../api';
+import { Avatar, TopBar } from '../components';
+import { useMe } from '../me';
+import { useNotify } from '../notice';
+import { useRoomSocket } from '../useRoomSocket';
+
+export default function ChatRoomPage() {
+  const { id = '' } = useParams();
+  const { me } = useMe();
+  const notify = useNotify();
+  const [room, setRoom] = useState<Room | null>(null);
+  const [members, setMembers] = useState<RoomMember[]>([]);
+  const [roomError, setRoomError] = useState('');
+  const [showMembers, setShowMembers] = useState(false);
+  const [text, setText] = useState('');
+  const [inputError, setInputError] = useState('');
+  const listRef = useRef<HTMLDivElement>(null);
+  const stickBottom = useRef(true);
+
+  const onNotice = useCallback((kind: 'error' | 'warning', t: string) => notify(kind, t), [notify]);
+  const s = useRoomSocket(id, onNotice);
+
+  const loadRoom = useCallback(async () => {
+    try {
+      const d = await api.get<{ room: Room; members: RoomMember[] }>(`/api/rooms/${encodeURIComponent(id)}`);
+      setRoom(d.room);
+      setMembers(d.members);
+    } catch (e) {
+      setRoomError(errMsg(e));
+    }
+  }, [id]);
+  useEffect(() => { void loadRoom(); }, [loadRoom]);
+
+  // ---------- เลื่อนลงล่างสุดเมื่อมีข้อความใหม่ (ถ้าผู้ใช้อยู่ล่างสุดอยู่แล้ว) ----------
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (el && stickBottom.current) el.scrollTop = el.scrollHeight;
+  }, [s.messages, s.pending]);
+
+  // ---------- บอกห้องว่าอ่านแล้ว (เฉพาะตอนหน้าจอเปิดอยู่) ----------
+  const lastSeq = s.messages.length ? s.messages[s.messages.length - 1].seq : 0;
+  useEffect(() => {
+    if (s.conn === 'open' && document.visibilityState === 'visible') s.markRead(lastSeq);
+  }, [lastSeq, s.conn, s.markRead]);
+
+  function onScroll() {
+    const el = listRef.current;
+    if (!el) return;
+    stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (el.scrollTop < 40 && s.hasMore && !s.loadingOlder) {
+      const before = el.scrollHeight;
+      void s.loadOlder().then(() => {
+        requestAnimationFrame(() => { if (listRef.current) listRef.current.scrollTop = listRef.current.scrollHeight - before; });
+      });
+    }
+  }
+
+  function submit(e?: FormEvent) {
+    e?.preventDefault();
+    const err = s.send(text);
+    if (err) { setInputError(err); return; }
+    setText('');
+    setInputError('');
+    stickBottom.current = true;
+  }
+
+  function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
+    // Enter = ส่ง · Shift+Enter = ขึ้นบรรทัดใหม่ (บนคอมพิวเตอร์)
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
+  }
+
+  if (roomError) {
+    return (
+      <div className="page">
+        <TopBar title="ห้องแชท" back="/" />
+        <div className="banner banner-error" role="alert">{roomError}</div>
+      </div>
+    );
+  }
+
+  const isGroup = room?.type === 'group';
+  const connText =
+    s.conn === 'connecting' ? 'กำลังเชื่อมต่อ…'
+    : s.conn === 'reconnecting' ? (s.connError ?? 'หลุดการเชื่อมต่อ กำลังต่อใหม่…')
+    : s.conn === 'failed' ? `เชื่อมต่อห้องไม่ได้: ${s.connError ?? ''}`
+    : null;
+
+  let lastDate = '';
+  return (
+    <div className="page chat-page">
+      <TopBar
+        back="/"
+        title={
+          <button className="topbar-room" onClick={() => isGroup && setShowMembers(true)} disabled={!isGroup}>
+            <span>{room?.title ?? '…'}</span>
+            {isGroup && <span className="small muted">{members.length} คน · แตะเพื่อดูสมาชิก</span>}
+          </button>
+        }
+      />
+      {connText && <div className={`banner ${s.conn === 'failed' ? 'banner-error' : 'banner-warning'}`} role="status">{connText}</div>}
+
+      <div className="messages" ref={listRef} onScroll={onScroll}>
+        {s.loadingOlder && <p className="center muted small">กำลังโหลดข้อความเก่า…</p>}
+        {s.messages.map((m) => {
+          const d = thaiDate(m.createdAt);
+          const showDate = d !== lastDate;
+          lastDate = d;
+          const mine = m.senderId === me.user.id;
+          return (
+            <div key={m.seq}>
+              {showDate && <div className="date-sep">{d}</div>}
+              <div className={`bubble-row ${mine ? 'mine' : ''}`}>
+                <div className="bubble">
+                  {!mine && isGroup && <div className="bubble-name">{m.senderName}</div>}
+                  <div className="bubble-body">{m.body}</div>
+                  <div className="bubble-meta">{thaiClock(m.createdAt)}</div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {s.pending.map((p) => (
+          <div key={p.clientId} className="bubble-row mine">
+            <div className={`bubble ${p.status === 'failed' ? 'bubble-failed' : 'bubble-sending'}`}>
+              <div className="bubble-body">{p.body}</div>
+              {p.status === 'sending' ? (
+                <div className="bubble-meta">กำลังส่ง…</div>
+              ) : (
+                <div className="bubble-fail">
+                  <div>ส่งไม่สำเร็จ: {p.reason}</div>
+                  <button className="link" onClick={() => s.retry(p.clientId)}>ส่งใหม่</button>
+                  <button className="link" onClick={() => s.discard(p.clientId)}>ลบ</button>
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <form className="composer" onSubmit={submit}>
+        {inputError && <p className="error-text small">{inputError}</p>}
+        <div className="composer-row">
+          <textarea
+            value={text}
+            onChange={(e) => { setText(e.target.value); if (inputError) setInputError(''); }}
+            onKeyDown={onKey}
+            rows={1}
+            maxLength={MAX_MESSAGE_CHARS}
+            placeholder="พิมพ์ข้อความ"
+          />
+          <button className="btn" disabled={s.conn === 'failed'}>ส่ง</button>
+        </div>
+      </form>
+
+      {showMembers && room && (
+        <MembersPanel
+          room={room}
+          members={members}
+          onClose={() => setShowMembers(false)}
+          onChanged={() => void loadRoom()}
+        />
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// สมาชิกกลุ่ม + เพิ่มสมาชิก (เจ้าของ/แอดมินกลุ่มเท่านั้น)
+// ---------------------------------------------------------------------
+function MembersPanel({ room, members, onClose, onChanged }: {
+  room: Room; members: RoomMember[]; onClose: () => void; onChanged: () => void;
+}) {
+  const notify = useNotify();
+  const canAdd = room.myRole === 'owner' || room.myRole === 'admin';
+  const [adding, setAdding] = useState(false);
+  const [users, setUsers] = useState<User[] | null>(null);
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  async function openAdd() {
+    setAdding(true);
+    try {
+      const d = await api.get<{ users: User[] }>('/api/users');
+      const inRoom = new Set(members.map((m) => m.id));
+      setUsers(d.users.filter((u) => !inRoom.has(u.id)));
+    } catch (e) {
+      setError(`โหลดรายชื่อไม่สำเร็จ: ${errMsg(e)}`);
+    }
+  }
+
+  async function save() {
+    if (picked.size === 0) { setError('เลือกคนที่จะเพิ่มก่อน'); return; }
+    setBusy(true);
+    setError('');
+    try {
+      await api.post(`/api/rooms/${encodeURIComponent(room.id)}/members`, { userIds: [...picked] });
+      notify('success', `เพิ่มสมาชิก ${picked.size} คนแล้ว`);
+      setAdding(false);
+      setPicked(new Set());
+      onChanged();
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head">
+          <b>{room.title}</b>
+          <button className="link" onClick={onClose}>ปิด</button>
+        </div>
+        {!adding ? (
+          <>
+            <ul className="user-list">
+              {members.map((m) => (
+                <li key={m.id} className="user-item">
+                  <Avatar name={m.displayName} url={m.pictureUrl} size={32} />
+                  <span>{m.displayName}</span>
+                  {m.role !== 'member' && <span className="small muted">{m.role === 'owner' ? 'เจ้าของ' : 'แอดมิน'}</span>}
+                </li>
+              ))}
+            </ul>
+            {canAdd && <button className="btn btn-block" onClick={() => void openAdd()}>+ เพิ่มสมาชิก</button>}
+          </>
+        ) : (
+          <>
+            {users === null && !error && <p className="muted">กำลังโหลด…</p>}
+            {users?.length === 0 && <p className="muted">ทุกคนอยู่ในกลุ่มแล้ว</p>}
+            <ul className="user-list">
+              {users?.map((u) => (
+                <li key={u.id}>
+                  <label className="user-item">
+                    <input
+                      type="checkbox"
+                      checked={picked.has(u.id)}
+                      onChange={() => setPicked((s) => { const n = new Set(s); if (n.has(u.id)) n.delete(u.id); else n.add(u.id); return n; })}
+                    />
+                    <Avatar name={u.displayName} url={u.pictureUrl} size={32} />
+                    <span>{u.displayName}</span>
+                  </label>
+                </li>
+              ))}
+            </ul>
+            {error && <p className="error-text">{error}</p>}
+            <button className="btn btn-block" disabled={busy} onClick={() => void save()}>
+              {busy ? 'กำลังเพิ่ม…' : `เพิ่ม ${picked.size} คน`}
+            </button>
+            <button className="btn btn-ghost btn-block" onClick={() => setAdding(false)}>ยกเลิก</button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

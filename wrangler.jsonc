@@ -1,0 +1,48 @@
+{
+  // =====================================================================
+  // wrangler.jsonc — ตั้งค่า Cloudflare Worker ของระบบแชท (chat-channel)
+  // Deploy: GitHub Actions (.github/workflows/deploy.yml) — PR = ตรวจอย่างเดียว · merge เข้า main = migration + deploy
+  // ห้ามเปิด Workers Builds ให้ repo นี้ (จะ deploy ซ้ำ 2 ทาง)
+  // =====================================================================
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "chat-channel",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-09-01",
+  "observability": { "enabled": true },
+
+  // ---------- โดเมน ----------
+  // ต้องมีโซน kalon-ai.app อยู่ใน Cloudflare account เดียวกัน ไม่งั้น deploy จะล้มพร้อมบอกเหตุผล
+  "routes": [{ "pattern": "noti.kalon-ai.app", "custom_domain": true }],
+
+  // ---------- ค่าที่ไม่ใช่ความลับ ----------
+  "vars": {
+    "APP_URL": "https://noti.kalon-ai.app",
+    "APP_NAME": "แชทส่วนตัว"
+  },
+  // ความลับ (ตั้งใน Dashboard → Workers → chat-channel → Settings → Variables and Secrets):
+  //   LINE_CHANNEL_ID, LINE_CHANNEL_SECRET, SETUP_TOKEN
+
+  // ---------- ไฟล์หน้าเว็บ (React SPA ที่ build แล้ว) ----------
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+
+  // ---------- D1 (ข้อมูลกลาง: ผู้ใช้ ห้อง สมาชิก) ----------
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "chat-channel-db",
+      "database_id": "ae8dd52d-8ad0-4936-af5f-cfc3eada7a28",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // ---------- Durable Object: 1 ห้อง = 1 ตัว (WebSocket + ข้อความเก็บใน SQLite ของห้อง) ----------
+  "durable_objects": {
+    "bindings": [{ "name": "ROOM", "class_name": "ChatRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ChatRoom"] }]
+}

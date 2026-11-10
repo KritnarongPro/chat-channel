@@ -1,0 +1,9 @@
+{
+  "name": "แชทส่วนตัว",
+  "short_name": "แชท",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2a6fdb",
+  "lang": "th"
+}

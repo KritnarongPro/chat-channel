@@ -1,0 +1,85 @@
+# =====================================================================
+# deploy.yml — ระบบแชท chat-channel: ตรวจ + deploy ผ่าน GitHub Actions (ไม่ใช้ Workers Builds)
+#   PR เข้า main      → ตรวจอย่างเดียว (typecheck + build) — ไม่ deploy
+#   push/merge เข้า main → ตรวจ → D1 migration (remote) → wrangler deploy
+#   ตรวจ = กฎใน cheat sheet (check:rules) + typecheck + build
+#   กดรันเองได้ (Actions → check-and-deploy → Run workflow) — บน main จะ deploy ด้วย
+# ต้องตั้ง GitHub Secrets: CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID (ไม่มี → ล้มพร้อมบอกเหตุผล ไม่ข้ามเงียบ)
+# ★ ห้ามเปิด Workers Builds ให้ repo นี้ — ไม่งั้น deploy ซ้ำ 2 ทาง
+# =====================================================================
+name: check-and-deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# deploy ต่อคิวทีละรอบ (ไม่ยกเลิกกลางทาง กัน migration ค้างครึ่ง ๆ) · PR รอบใหม่ยกเลิกรอบเก่าได้
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  # ---------- ตรวจ: ต้องผ่านก่อนทุกครั้ง ----------
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: ตรวจกฎจาก cheat sheet (ข้อสอบอัตโนมัติ)
+        run: npm run check:rules
+      - name: Typecheck (หน้าเว็บ + worker)
+        run: npm run typecheck
+      - name: Build หน้าเว็บ
+        run: npm run build
+
+  # ---------- deploy: เฉพาะ main (หลัง merge หรือกดรันเอง) ----------
+  deploy:
+    needs: check
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: ตรวจว่าตั้ง Secrets ครบ
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=""
+          [ -z "$CF_TOKEN" ] && missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -z "$CF_ACCOUNT" ] && missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::ยังไม่ได้ตั้ง GitHub Secrets:$missing — ไปที่ Settings → Secrets and variables → Actions แล้วกด Re-run"
+            exit 1
+          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - name: Build หน้าเว็บ
+        run: npm run build
+      - name: D1 migration (remote) แล้ว deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy
+      - name: สรุป (เวลาไทย)
+        if: always()
+        run: |
+          echo "### deploy ${{ job.status }} — $(TZ=Asia/Bangkok date '+%Y-%m-%d %H:%M:%S') (เวลาไทย)" >> "$GITHUB_STEP_SUMMARY"
+          echo "commit: ${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"

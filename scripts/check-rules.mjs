@@ -1,0 +1,101 @@
+// =====================================================================
+// scripts/check-rules.mjs — ข้อสอบอัตโนมัติจาก cheat sheet (รันใน GitHub Actions ทุก PR)
+//   CORE-xx = กฎที่ใช้ได้ทุกโปรเจกต์ (CHEATSHEET-CORE.md)
+//   BUGS-xx = บทเรียนเฉพาะโปรเจกต์นี้ (CHEATSHEET-BUGS.md)
+// ผิดข้อไหน → พิมพ์รหัสข้อ + ไฟล์ + เหตุผล แล้วจบด้วย exit 1 (PR ขึ้นแดง)
+// =====================================================================
+
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+
+const root = new URL('..', import.meta.url).pathname;
+const failures = [];
+const fail = (id, msg) => failures.push(`✗ ${id}: ${msg}`);
+const read = (p) => readFileSync(join(root, p), 'utf8');
+
+function walk(dir, exts) {
+  const out = [];
+  const abs = join(root, dir);
+  if (!existsSync(abs)) return out;
+  for (const name of readdirSync(abs)) {
+    const rel = join(dir, name);
+    if (statSync(join(root, rel)).isDirectory()) out.push(...walk(rel, exts));
+    else if (exts.some((e) => name.endsWith(e))) out.push(rel);
+  }
+  return out;
+}
+const codeFiles = [...walk('worker', ['.ts']), ...walk('src', ['.ts', '.tsx']), ...walk('shared', ['.ts'])];
+
+// ---------- CORE-01 เวลาไทยเสมอ: ห้ามใช้ toISOString() นอก shared/time.ts ----------
+for (const f of codeFiles) {
+  if (f === join('shared', 'time.ts')) continue;
+  read(f).split('\n').forEach((line, i) => {
+    if (/\.toISOString\(\)/.test(line)) fail('CORE-01', `${f}:${i + 1} ใช้ toISOString() (ได้เวลา UTC) — ใช้ nowThai()/toThaiIso() จาก shared/time.ts`);
+  });
+}
+
+// ---------- CORE-02 ห้ามกลืน error เงียบ: catch ว่าง ----------
+for (const f of codeFiles) {
+  const src = read(f);
+  const re = /catch\s*(\([^)]*\))?\s*\{\s*\}/g;
+  let m;
+  while ((m = re.exec(src))) {
+    const line = src.slice(0, m.index).split('\n').length;
+    fail('CORE-02', `${f}:${line} มี catch ว่าง — ต้องแจ้ง error พร้อมเหตุผล (หรืออย่างน้อย console.error)`);
+  }
+}
+
+// ---------- CORE-03 migration แยกไฟล์ + schema.sql ตรงกัน ----------
+const migs = readdirSync(join(root, 'migrations')).filter((f) => f.endsWith('.sql')).sort();
+migs.forEach((f, i) => {
+  const want = String(i + 1).padStart(4, '0');
+  if (!f.startsWith(want + '_')) fail('CORE-03', `migrations/${f} เลขไม่เรียงต่อกัน (ควรขึ้นต้นด้วย ${want}_)`);
+});
+const schema = read('schema.sql').toLowerCase();
+const latest = /ล่าสุดถึง:\s*(\S+)/.exec(read('schema.sql'));
+if (!latest || latest[1] !== migs[migs.length - 1]) {
+  fail('CORE-03', `schema.sql บรรทัด "ล่าสุดถึง:" ต้องเป็น ${migs[migs.length - 1]} (ตอนนี้: ${latest ? latest[1] : 'ไม่มี'})`);
+}
+for (const f of migs) {
+  const sql = read(join('migrations', f)).toLowerCase();
+  for (const m of sql.matchAll(/create table (?:if not exists )?(\w+)/g)) {
+    if (!new RegExp(`create table (if not exists )?${m[1]}\\b`).test(schema)) fail('CORE-03', `ตาราง ${m[1]} (จาก ${f}) ไม่อยู่ใน schema.sql`);
+  }
+  for (const m of sql.matchAll(/alter table (\w+) add column (\w+)/g)) {
+    if (!schema.includes(m[2])) fail('CORE-03', `คอลัมน์ ${m[1]}.${m[2]} (จาก ${f}) ไม่อยู่ใน schema.sql`);
+  }
+}
+
+// ---------- CORE-04 ต้องบอกวิธี deploy ไว้ใน README ----------
+if (!/GitHub Actions/.test(read('README.md'))) fail('CORE-04', 'README.md ต้องบอกวิธี deploy (GitHub Actions)');
+
+// ---------- BUGS-01 โครงตารางในห้อง (Durable Object) ต้องตรงกับ do-schema.sql ----------
+const room = read(join('worker', 'room.ts'));
+const codeVer = /export const DO_SCHEMA_VERSION = (\d+)/.exec(room);
+const docVer = /DO_SCHEMA_VERSION:\s*(\d+)/.exec(read('do-schema.sql'));
+if (!codeVer || !docVer || codeVer[1] !== docVer[1]) {
+  fail('BUGS-01', `เลข DO_SCHEMA_VERSION ใน worker/room.ts (${codeVer?.[1]}) ไม่ตรงกับ do-schema.sql (${docVer?.[1]})`);
+} else {
+  for (let v = 1; v <= Number(codeVer[1]); v++) {
+    if (!new RegExp(`\\n\\s*${v}: \\[`).test(room)) fail('BUGS-01', `DO_MIGRATIONS ใน worker/room.ts ไม่มีเวอร์ชัน ${v}`);
+  }
+}
+
+// ---------- BUGS-02 endpoint ต้องอยู่ในตาราง routes และระบุสิทธิ์ (need) ทุกตัว ----------
+const index = read(join('worker', 'index.ts'));
+for (const m of index.matchAll(/\{ method: '[A-Z]+',\s*pattern: '([^']+)',([^}]*)\}/g)) {
+  if (!/need: '(public|any|active|admin)'/.test(m[2])) fail('BUGS-02', `route ${m[1]} ไม่ได้ระบุ need (สิทธิ์)`);
+}
+
+// ---------- BUGS-03 ตรวจ Origin ต้องยอมรับโดเมนเดียวกับที่เรียกด้วย (ไม่งั้นทดสอบในเครื่องแล้ว WebSocket โดน 403) ----------
+if (!/origin !== new URL\(req\.url\)\.origin/.test(index)) {
+  fail('BUGS-03', 'checkOrigin ใน worker/index.ts ต้องเทียบกับ new URL(req.url).origin ด้วย ไม่ใช่ APP_URL อย่างเดียว');
+}
+
+// ---------- สรุป ----------
+if (failures.length) {
+  console.error(failures.join('\n'));
+  console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
+  process.exit(1);
+}
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..04, BUGS-01..03)');

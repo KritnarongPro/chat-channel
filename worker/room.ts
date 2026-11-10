@@ -1,0 +1,304 @@
+// =====================================================================
+// worker/room.ts — ห้องแชท 1 ห้อง = Durable Object 1 ตัว (ChatRoom)
+//
+// สารบัญ
+//   0. โครงตารางในห้อง (SQLite ของ Durable Object) + เวอร์ชัน
+//   1. ทางเข้า HTTP จาก worker (/ws, /history) — เรียกได้จาก worker เท่านั้น ไม่เปิดสู่ภายนอก
+//   2. WebSocket: รับข้อความ / sync / read / ping
+//   3. งานเขียนลง D1 (ข้อความล่าสุดของห้อง, อ่านถึงไหน) — ล้มเหลว → แจ้งผู้ส่งเสมอ
+//
+// worker ตรวจล็อกอิน + สิทธิ์สมาชิกห้องก่อนส่งต่อมาที่นี่ แล้วแนบหัว X-User-Id / X-User-Name / X-Room-Id
+// =====================================================================
+
+import { DurableObject } from 'cloudflare:workers';
+import { nowThai } from '../shared/time';
+import {
+  ChatMessage, ClientFrame, ServerFrame,
+  HISTORY_LIMIT, MAX_MESSAGE_CHARS, SYNC_LIMIT,
+} from '../shared/protocol';
+import type { Env } from './lib';
+
+// =====================================================================
+// 0. โครงตารางในห้อง — ต้องตรงกับ do-schema.sql (check:rules ตรวจเลขเวอร์ชัน)
+// =====================================================================
+export const DO_SCHEMA_VERSION = 1;
+
+const DO_MIGRATIONS: Record<number, string[]> = {
+  1: [
+    `CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+    `CREATE TABLE IF NOT EXISTS messages (
+       seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+       id          TEXT NOT NULL UNIQUE,
+       sender_id   TEXT NOT NULL,
+       sender_name TEXT NOT NULL,
+       kind        TEXT NOT NULL CHECK (kind IN ('text')),
+       body        TEXT NOT NULL,
+       created_at  TEXT NOT NULL
+     )`,
+  ],
+};
+
+type MsgRow = {
+  seq: number; id: string; sender_id: string; sender_name: string;
+  kind: 'text'; body: string; created_at: string;
+};
+const msgOut = (r: MsgRow): ChatMessage => ({
+  seq: r.seq, id: r.id, senderId: r.sender_id, senderName: r.sender_name,
+  kind: r.kind, body: r.body, createdAt: r.created_at,
+});
+
+interface SocketInfo { userId: string; userName: string }
+
+const json = (data: unknown, status = 200) =>
+  new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
+
+export class ChatRoom extends DurableObject<Env> {
+  private sql: SqlStorage;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.sql = ctx.storage.sql;
+    ctx.blockConcurrencyWhile(async () => this.migrate());
+  }
+
+  /** สร้าง/อัปเดตตารางในห้องตามเวอร์ชัน */
+  private migrate() {
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+    const row = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'schema_version'`).toArray()[0];
+    let current = row ? Number(row.value) : 0;
+    while (current < DO_SCHEMA_VERSION) {
+      const next = current + 1;
+      for (const stmt of DO_MIGRATIONS[next] ?? []) this.sql.exec(stmt);
+      this.sql.exec(
+        `INSERT INTO meta (key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        String(next),
+      );
+      current = next;
+    }
+  }
+
+  private get roomId(): string | null {
+    const r = this.sql.exec<{ value: string }>(`SELECT value FROM meta WHERE key = 'room_id'`).toArray()[0];
+    return r ? r.value : null;
+  }
+
+  private rememberRoomId(id: string) {
+    this.sql.exec(
+      `INSERT INTO meta (key, value) VALUES ('room_id', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`, id,
+    );
+  }
+
+  // =====================================================================
+  // 1. ทางเข้า HTTP จาก worker
+  // =====================================================================
+  async fetch(req: Request): Promise<Response> {
+    const url = new URL(req.url);
+    const roomId = req.headers.get('X-Room-Id');
+    if (roomId) this.rememberRoomId(roomId);
+
+    // ---------- เปิด WebSocket ----------
+    if (url.pathname === '/ws') {
+      if (req.headers.get('Upgrade') !== 'websocket') {
+        return json({ ok: false, error: { code: 'NOT_WEBSOCKET', message: 'ต้องเชื่อมต่อแบบ WebSocket' } }, 426);
+      }
+      const userId = req.headers.get('X-User-Id');
+      const userName = req.headers.get('X-User-Name');
+      if (!userId || !userName) {
+        return json({ ok: false, error: { code: 'NO_USER', message: 'ไม่พบข้อมูลผู้ใช้ที่ส่งมาจาก worker' } }, 400);
+      }
+      const pair = new WebSocketPair();
+      const [client, server] = [pair[0], pair[1]];
+      this.ctx.acceptWebSocket(server);
+      server.serializeAttachment({ userId, userName: decodeURIComponent(userName) } satisfies SocketInfo);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    // ---------- ประวัติย้อนหลัง (เลื่อนขึ้นดูข้อความเก่า) ----------
+    if (url.pathname === '/history') {
+      const before = Number(url.searchParams.get('before') || Number.MAX_SAFE_INTEGER);
+      const limit = Math.min(Number(url.searchParams.get('limit') || HISTORY_LIMIT), HISTORY_LIMIT);
+      if (!Number.isFinite(before) || !Number.isFinite(limit) || limit < 1) {
+        return json({ ok: false, error: { code: 'BAD_QUERY', message: 'ค่า before/limit ไม่ถูกต้อง' } }, 400);
+      }
+      const rows = this.sql.exec<MsgRow>(
+        `SELECT * FROM messages WHERE seq < ? ORDER BY seq DESC LIMIT ?`, before, limit + 1,
+      ).toArray();
+      const hasMore = rows.length > limit;
+      const messages = rows.slice(0, limit).reverse().map(msgOut);
+      return json({ ok: true, data: { messages, hasMore } });
+    }
+
+    return json({ ok: false, error: { code: 'NOT_FOUND', message: 'ไม่พบเส้นทางในห้องแชท' } }, 404);
+  }
+
+  // =====================================================================
+  // 2. WebSocket
+  // =====================================================================
+  private send(ws: WebSocket, frame: ServerFrame) {
+    try {
+      ws.send(JSON.stringify(frame));
+    } catch (err) {
+      console.error('ส่งข้อมูลให้ผู้ใช้ไม่สำเร็จ (socket อาจปิดแล้ว)', err);
+    }
+  }
+
+  private broadcast(frame: ServerFrame) {
+    for (const ws of this.ctx.getWebSockets()) this.send(ws, frame);
+  }
+
+  async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer) {
+    const info = ws.deserializeAttachment() as SocketInfo | null;
+    if (!info) {
+      this.send(ws, { type: 'error', code: 'NO_SESSION', message: 'ไม่พบข้อมูลผู้ใช้ของการเชื่อมต่อนี้ กรุณาเปิดห้องใหม่' });
+      return;
+    }
+    if (typeof raw !== 'string' || raw.length > MAX_MESSAGE_CHARS * 4 + 500) {
+      this.send(ws, { type: 'error', code: 'BAD_FRAME', message: 'ข้อมูลที่ส่งมาไม่ถูกต้องหรือใหญ่เกินไป' });
+      return;
+    }
+    let frame: ClientFrame;
+    try {
+      frame = JSON.parse(raw) as ClientFrame;
+    } catch {
+      this.send(ws, { type: 'error', code: 'BAD_JSON', message: 'อ่านข้อมูลที่ส่งมาไม่ได้ (JSON ไม่ถูกต้อง)' });
+      return;
+    }
+
+    switch (frame.type) {
+      case 'ping':
+        this.send(ws, { type: 'pong' });
+        return;
+      case 'sync':
+        this.handleSync(ws, frame.afterSeq);
+        return;
+      case 'read':
+        await this.handleRead(ws, info, frame.seq);
+        return;
+      case 'send':
+        await this.handleSend(ws, info, frame.clientId, frame.body);
+        return;
+      default:
+        this.send(ws, { type: 'error', code: 'UNKNOWN_TYPE', message: 'ไม่รู้จักคำสั่งนี้' });
+    }
+  }
+
+  async webSocketClose(ws: WebSocket, code: number, reason: string) {
+    try {
+      ws.close(code, reason);
+    } catch (err) {
+      console.log('socket ปิดไปแล้ว', err);
+    }
+  }
+
+  async webSocketError(_ws: WebSocket, err: unknown) {
+    console.error('WebSocket ผิดพลาด', err);
+  }
+
+  private handleSync(ws: WebSocket, afterSeq: number) {
+    if (!Number.isInteger(afterSeq) || afterSeq < 0) {
+      this.send(ws, { type: 'error', code: 'BAD_SYNC', message: 'ค่าลำดับข้อความสำหรับดึงข้อมูลไม่ถูกต้อง' });
+      return;
+    }
+    let rows: MsgRow[];
+    if (afterSeq === 0) {
+      // เปิดห้องครั้งแรก → เอาข้อความล่าสุดชุดเดียว
+      rows = this.sql.exec<MsgRow>(`SELECT * FROM messages ORDER BY seq DESC LIMIT ?`, HISTORY_LIMIT).toArray().reverse();
+      const total = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM messages`).one().n;
+      this.send(ws, { type: 'sync', messages: rows.map(msgOut), hasMore: total > rows.length });
+      return;
+    }
+    rows = this.sql.exec<MsgRow>(
+      `SELECT * FROM messages WHERE seq > ? ORDER BY seq ASC LIMIT ?`, afterSeq, SYNC_LIMIT + 1,
+    ).toArray();
+    this.send(ws, { type: 'sync', messages: rows.slice(0, SYNC_LIMIT).map(msgOut), hasMore: rows.length > SYNC_LIMIT });
+  }
+
+  private async handleSend(ws: WebSocket, info: SocketInfo, clientId: unknown, body: unknown) {
+    // ---------- ตรวจข้อมูล ----------
+    if (typeof clientId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(clientId)) {
+      this.send(ws, { type: 'error', code: 'BAD_CLIENT_ID', message: 'รหัสข้อความไม่ถูกต้อง' });
+      return;
+    }
+    if (typeof body !== 'string' || body.trim() === '') {
+      this.send(ws, { type: 'error', clientId, code: 'EMPTY', message: 'ข้อความว่าง ส่งไม่ได้' });
+      return;
+    }
+    if (body.length > MAX_MESSAGE_CHARS) {
+      this.send(ws, { type: 'error', clientId, code: 'TOO_LONG', message: `ข้อความยาวเกิน ${MAX_MESSAGE_CHARS} ตัวอักษร` });
+      return;
+    }
+
+    // ---------- ส่งซ้ำ (เช่นกดส่งใหม่หลังเน็ตหลุด) → ตอบลำดับเดิม ไม่บันทึกซ้ำ ----------
+    const existing = this.sql.exec<{ seq: number }>(`SELECT seq FROM messages WHERE id = ?`, clientId).toArray()[0];
+    if (existing) {
+      this.send(ws, { type: 'ack', clientId, seq: existing.seq });
+      return;
+    }
+
+    // ---------- บันทึก ----------
+    let row: MsgRow;
+    try {
+      row = this.sql.exec<MsgRow>(
+        `INSERT INTO messages (id, sender_id, sender_name, kind, body, created_at)
+         VALUES (?, ?, ?, 'text', ?, ?) RETURNING *`,
+        clientId, info.userId, info.userName, body, nowThai(),
+      ).one();
+    } catch (err) {
+      console.error('บันทึกข้อความไม่สำเร็จ', err);
+      this.send(ws, { type: 'error', clientId, code: 'SAVE_FAILED', message: 'บันทึกข้อความไม่สำเร็จ กรุณากดส่งใหม่' });
+      return;
+    }
+
+    const message = msgOut(row);
+    this.send(ws, { type: 'ack', clientId, seq: message.seq });
+    this.broadcast({ type: 'message', message });
+
+    // ---------- อัปเดตหน้ารายการแชทใน D1 ----------
+    await this.updateRoomSummary(ws, message);
+  }
+
+  // =====================================================================
+  // 3. งานเขียนลง D1
+  // =====================================================================
+  private async updateRoomSummary(ws: WebSocket, m: ChatMessage) {
+    const roomId = this.roomId;
+    if (!roomId) {
+      this.send(ws, { type: 'warning', code: 'NO_ROOM_ID', message: 'ส่งข้อความแล้ว แต่ไม่รู้รหัสห้อง จึงอัปเดตรายการแชทไม่ได้' });
+      return;
+    }
+    try {
+      await this.env.DB.batch([
+        this.env.DB.prepare(
+          `UPDATE rooms SET last_seq = ?, last_message_at = ?, last_message_preview = ?, last_sender_name = ?
+           WHERE id = ? AND last_seq < ?`,
+        ).bind(m.seq, m.createdAt, m.body.slice(0, 120), m.senderName, roomId, m.seq),
+        // ผู้ส่งถือว่าอ่านข้อความตัวเองแล้ว
+        this.env.DB.prepare(
+          `UPDATE room_members SET last_read_seq = MAX(last_read_seq, ?) WHERE room_id = ? AND user_id = ?`,
+        ).bind(m.seq, roomId, m.senderId),
+      ]);
+    } catch (err) {
+      console.error('อัปเดต rooms ใน D1 ไม่สำเร็จ', err);
+      this.send(ws, {
+        type: 'warning', code: 'SUMMARY_FAILED',
+        message: 'ส่งข้อความแล้ว แต่อัปเดตหน้ารายการแชทไม่สำเร็จ (ข้อความล่าสุดอาจยังไม่ขึ้นในรายการ)',
+      });
+    }
+  }
+
+  private async handleRead(ws: WebSocket, info: SocketInfo, seq: unknown) {
+    const roomId = this.roomId;
+    if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0 || !roomId) {
+      this.send(ws, { type: 'error', code: 'BAD_READ', message: 'บันทึกสถานะอ่านแล้วไม่ได้ (ข้อมูลไม่ถูกต้อง)' });
+      return;
+    }
+    try {
+      await this.env.DB.prepare(
+        `UPDATE room_members SET last_read_seq = MAX(last_read_seq, ?) WHERE room_id = ? AND user_id = ?`,
+      ).bind(seq, roomId, info.userId).run();
+    } catch (err) {
+      console.error('บันทึกสถานะอ่านแล้วไม่สำเร็จ', err);
+      this.send(ws, { type: 'warning', code: 'READ_FAILED', message: 'บันทึกสถานะ "อ่านแล้ว" ไม่สำเร็จ ตัวเลขยังไม่อ่านอาจไม่ตรง' });
+    }
+  }
+}
