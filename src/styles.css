@@ -95,3 +95,22 @@ input, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--borde
 .sheet { background: #fff; width: 100%; max-width: 720px; max-height: 80vh; overflow-y: auto; border-radius: 16px 16px 0 0; padding: 12px 12px calc(12px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 8px; }
 .sheet-head { display: flex; justify-content: space-between; align-items: center; padding: 4px; }
 .login h1 { margin-top: 15vh; }
+
+/* ---------- ไฟล์ / รูป / เสียง (เฟส 2) ---------- */
+.composer-tools { display: flex; gap: 4px; margin-bottom: 6px; }
+.tool { background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: 14px; cursor: pointer; }
+.tool:disabled { opacity: .5; }
+.msg-image { display: block; max-width: 100%; max-height: 320px; width: auto; height: auto; border-radius: 10px; margin: 2px 0; background: var(--bg); }
+.msg-audio { width: 240px; max-width: 100%; display: block; }
+.file-card { display: flex; gap: 8px; align-items: center; text-decoration: none; color: inherit; padding: 6px 4px; }
+.file-icon { font-size: 26px; }
+.file-info { display: flex; flex-direction: column; min-width: 0; }
+.file-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.file-expired, .file-broken { font-size: 13px; color: var(--muted); font-style: italic; }
+.file-broken { color: var(--red); font-style: normal; }
+.progress { height: 4px; background: var(--border); border-radius: 2px; margin-top: 3px; overflow: hidden; }
+.progress div { height: 100%; background: var(--blue); transition: width .2s; }
+.recorder { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+.rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); animation: blink 1s infinite; }
+.rec-time { flex: 1; font-variant-numeric: tabular-nums; }
+@keyframes blink { 50% { opacity: .3; } }

@@ -4,16 +4,20 @@
 //
 // สารบัญ
 //   1. Router + ตาราง endpoint แยกหมวด
-//   2. Handlers: health / auth / setup / admin / users / rooms / messages
+//   2. Handlers: health / auth / setup / admin / users / rooms / messages / files
 //   3. ตัวช่วยเรื่องห้อง (ตรวจสมาชิก)
-//   4. Entry point
+//   4. Entry point (fetch + scheduled: ลบไฟล์ครบ 180 วัน)
 //
 // กติกา: ข้อมูลไม่ผ่านเงื่อนไข หรือเขียน D1 ไม่สำเร็จ → ตอบ error พร้อมเหตุผลภาษาไทยเสมอ
 // สิทธิ์ทุก endpoint ตรวจผ่าน requireUser() ใน lib.ts ที่เดียว
 // =====================================================================
 
 import { nowThai } from '../shared/time';
-import { HISTORY_LIMIT } from '../shared/protocol';
+import {
+  FILE_RETENTION_DAYS, FileKind, HISTORY_LIMIT, IMAGE_MIMES, MAX_BYTES, MAX_VOICE_SECONDS, VOICE_MIMES,
+} from '../shared/protocol';
+import { thaiAfter } from '../shared/time';
+import { cleanupFiles } from './cleanup';
 import {
   ApiError, Env, Need, User, clearSessionCookie, db, fail, newId, ok, readCookie, readJson,
   requireUser, sha256, SESSION_COOKIE, userOut,
@@ -65,6 +69,10 @@ const routes: Route[] = [
   // ---------- messages (ส่งต่อไปที่ห้อง = Durable Object) ----------
   { method: 'GET',  pattern: '/api/rooms/:id/messages',       need: 'active', handler: history },
   { method: 'GET',  pattern: '/api/rooms/:id/ws',             need: 'active', handler: openSocket },
+
+  // ---------- files (รูป / ไฟล์ / เสียง — ตัวไฟล์อยู่ใน R2 เปิดได้เฉพาะสมาชิกห้อง) ----------
+  { method: 'POST', pattern: '/api/rooms/:id/files',          need: 'active', handler: uploadFile },
+  { method: 'GET',  pattern: '/api/files/:fileId',            need: 'active', handler: downloadFile },
 ];
 
 function match(pattern: string, path: string): Record<string, string> | null {
@@ -398,6 +406,126 @@ async function openSocket(c: Ctx) {
   }));
 }
 
+// ---------- files ----------
+/**
+ * อัปโหลด: body = ตัวไฟล์ดิบ (ไม่ใช่ form) · Content-Type = ชนิดไฟล์ · ต้องมี Content-Length
+ * หัวเพิ่ม: X-File-Kind (image/file/voice), X-File-Name (encodeURIComponent), X-Width, X-Height, X-Duration-Ms
+ * ลำดับ: เขียน R2 → บันทึก D1 (ไม่สำเร็จ → ลบไฟล์ใน R2 คืน แล้วตอบ error)
+ */
+async function uploadFile(c: Ctx) {
+  await requireMember(c.env, c.params.id, c.user!.id);
+  const h = c.req.headers;
+  const kind = h.get('X-File-Kind') as FileKind | null;
+  if (kind !== 'image' && kind !== 'file' && kind !== 'voice') {
+    throw new ApiError(400, 'BAD_KIND', 'ชนิดไฟล์ต้องเป็น image, file หรือ voice');
+  }
+  const size = Number(h.get('Content-Length'));
+  if (!Number.isFinite(size) || size <= 0) throw new ApiError(411, 'NO_LENGTH', 'ไม่ทราบขนาดไฟล์ หรือไฟล์ว่าง');
+  if (size > MAX_BYTES[kind]) {
+    throw new ApiError(413, 'TOO_LARGE', `ไฟล์ใหญ่เกิน ${Math.round(MAX_BYTES[kind] / 1024 / 1024)}MB`);
+  }
+  const mime = (h.get('Content-Type') || 'application/octet-stream').split(';')[0].trim().toLowerCase();
+  if (kind === 'image' && !IMAGE_MIMES.includes(mime)) {
+    throw new ApiError(415, 'BAD_IMAGE_TYPE', 'รองรับเฉพาะรูป JPG, PNG, WEBP, GIF — ชนิดอื่นให้ "ส่งเป็นไฟล์"');
+  }
+  if (kind === 'voice' && !VOICE_MIMES.includes(mime)) {
+    throw new ApiError(415, 'BAD_VOICE_TYPE', `ชนิดไฟล์เสียงไม่รองรับ (${mime})`);
+  }
+  let name: string;
+  try {
+    name = decodeURIComponent(h.get('X-File-Name') || '').trim();
+  } catch {
+    throw new ApiError(400, 'BAD_NAME', 'ชื่อไฟล์ไม่ถูกต้อง');
+  }
+  if (!name) name = kind === 'voice' ? 'ข้อความเสียง' : kind === 'image' ? 'รูปภาพ' : 'ไฟล์';
+  name = name.replace(/[\\/\r\n\t]/g, '_').slice(0, 200);
+  const num = (v: string | null) => (v && /^\d+$/.test(v) ? Number(v) : null);
+  const width = num(h.get('X-Width'));
+  const height = num(h.get('X-Height'));
+  const durationMs = num(h.get('X-Duration-Ms'));
+  if (kind === 'voice' && durationMs !== null && durationMs > (MAX_VOICE_SECONDS + 5) * 1000) {
+    throw new ApiError(413, 'TOO_LONG', `ข้อความเสียงยาวเกิน ${MAX_VOICE_SECONDS / 60} นาที`);
+  }
+  if (!c.req.body) throw new ApiError(400, 'NO_BODY', 'ไม่พบตัวไฟล์ที่ส่งมา');
+
+  const id = newId();
+  const key = `rooms/${c.params.id}/${id}`;
+  try {
+    await c.env.FILES.put(key, c.req.body, { httpMetadata: { contentType: mime } });
+  } catch (err) {
+    console.error('เขียนไฟล์ลง R2 ไม่สำเร็จ', err);
+    throw new ApiError(502, 'R2_FAILED', 'อัปโหลดไฟล์ไม่สำเร็จ (ที่เก็บไฟล์ขัดข้องหรือเน็ตหลุดระหว่างอัป) กรุณาลองใหม่');
+  }
+
+  const now = nowThai();
+  const expiresAt = thaiAfter(FILE_RETENTION_DAYS * 86400_000);
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO files (id, room_id, uploader_id, r2_key, kind, mime, name, size, width, height, duration_ms,
+                          status, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)`,
+    ).bind(id, c.params.id, c.user!.id, key, kind, mime, name, size, width, height, durationMs, now, expiresAt).run();
+  } catch (err) {
+    console.error('บันทึกไฟล์ลง D1 ไม่สำเร็จ', err);
+    try {
+      await c.env.FILES.delete(key);
+    } catch (delErr) {
+      console.error('ลบไฟล์ที่ค้างใน R2 ไม่สำเร็จ (cron จะไม่เห็นเพราะไม่มีแถวใน D1)', key, delErr);
+    }
+    throw new ApiError(500, 'DB_FAILED', 'บันทึกข้อมูลไฟล์ไม่สำเร็จ กรุณาลองใหม่');
+  }
+  return ok({ fileId: id, name, size, mime, expiresAt }, 201);
+}
+
+/** เปิด/ดาวน์โหลดไฟล์ — สมาชิกห้องเท่านั้น · รองรับ Range (iPhone ต้องใช้ตอนเล่นเสียง) */
+async function downloadFile(c: Ctx) {
+  const f = await db('อ่านข้อมูลไฟล์', () =>
+    c.env.DB.prepare(`SELECT room_id, r2_key, kind, mime, name, status, expires_at FROM files WHERE id = ?`)
+      .bind(c.params.fileId)
+      .first<{ room_id: string; r2_key: string; kind: FileKind; mime: string; name: string; status: string; expires_at: string }>(),
+  );
+  if (!f) throw new ApiError(404, 'FILE_NOT_FOUND', 'ไม่พบไฟล์นี้');
+  await requireMember(c.env, f.room_id, c.user!.id);
+  if (f.status === 'expired' || f.expires_at < nowThai()) {
+    throw new ApiError(410, 'FILE_EXPIRED', `ไฟล์หมดอายุแล้ว (เก็บไว้ ${FILE_RETENTION_DAYS} วัน)`);
+  }
+
+  let obj: R2ObjectBody | R2Object | null;
+  try {
+    obj = await c.env.FILES.get(f.r2_key, { range: c.req.headers, onlyIf: c.req.headers });
+  } catch (err) {
+    console.error('อ่านไฟล์จาก R2 ไม่สำเร็จ', err);
+    throw new ApiError(502, 'R2_FAILED', 'เปิดไฟล์ไม่สำเร็จ (ที่เก็บไฟล์ขัดข้อง) กรุณาลองใหม่');
+  }
+  if (!obj) throw new ApiError(404, 'FILE_MISSING', 'ไม่พบตัวไฟล์ในที่เก็บ (อาจถูกลบไปแล้ว)');
+
+  const headers = new Headers();
+  headers.set('ETag', obj.httpEtag);
+  headers.set('Accept-Ranges', 'bytes');
+  headers.set('Cache-Control', 'private, max-age=86400');
+  headers.set('X-Content-Type-Options', 'nosniff');
+  // ไฟล์ทั่วไปบังคับดาวน์โหลด และไม่ให้เบราว์เซอร์ตีความเป็นหน้าเว็บ (กันไฟล์ HTML/SVG ฝังสคริปต์)
+  if (f.kind === 'file') {
+    headers.set('Content-Type', 'application/octet-stream');
+    headers.set('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(f.name)}`);
+  } else {
+    headers.set('Content-Type', f.mime);
+    headers.set('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(f.name)}`);
+  }
+  if (!('body' in obj)) return new Response(null, { status: 304, headers }); // ไม่เปลี่ยน (If-None-Match)
+
+  const range = obj.range as { offset?: number; length?: number; suffix?: number } | undefined;
+  if (range && c.req.headers.has('Range')) {
+    const offset = range.offset ?? (range.suffix !== undefined ? obj.size - range.suffix : 0);
+    const length = range.length ?? obj.size - offset;
+    headers.set('Content-Range', `bytes ${offset}-${offset + length - 1}/${obj.size}`);
+    headers.set('Content-Length', String(length));
+    return new Response(obj.body, { status: 206, headers });
+  }
+  headers.set('Content-Length', String(obj.size));
+  return new Response(obj.body, { status: 200, headers });
+}
+
 // =====================================================================
 // 3. ตัวช่วยเรื่องห้อง
 // =====================================================================
@@ -431,5 +559,10 @@ export default {
     const url = new URL(req.url);
     if (url.pathname.startsWith('/api/')) return route(req, env);
     return env.ASSETS.fetch(req);
+  },
+
+  // ทุกวัน 03:00 เวลาไทย (ดู wrangler.jsonc → triggers)
+  async scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(cleanupFiles(env));
   },
 } satisfies ExportedHandler<Env>;

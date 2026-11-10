@@ -6,20 +6,37 @@
 //   - ต่อไม่ได้ 3 ครั้งติด → ถามเซิร์ฟเวอร์ว่าเพราะอะไร (หมดอายุล็อกอิน / ไม่ใช่สมาชิก ฯลฯ) แล้วแจ้งผู้ใช้
 //   - ข้อความที่ส่ง: กำลังส่ง → ส่งแล้ว · ไม่ได้รับยืนยันใน 10 วินาที หรือเซิร์ฟเวอร์ตอบ error → "ส่งไม่สำเร็จ + เหตุผล" กดส่งใหม่ได้
 //     ส่งใหม่ใช้รหัสเดิม เซิร์ฟเวอร์จึงไม่บันทึกซ้ำ
+//   - ไฟล์ (เฟส 2): กำลังอัป (%) → กำลังส่ง → ส่งแล้ว · อัปไม่สำเร็จ → "ส่งไม่สำเร็จ + เหตุผล" กดส่งใหม่ = อัปใหม่
 // =====================================================================
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChatMessage, ClientFrame, ServerFrame } from '../shared/protocol';
-import { MAX_MESSAGE_CHARS } from '../shared/protocol';
-import { api, errMsg } from './api';
+import type { ChatMessage, ClientFrame, FileKind, ServerFrame } from '../shared/protocol';
+import { MAX_BYTES, MAX_MESSAGE_CHARS } from '../shared/protocol';
+import { api, errMsg, uploadFile } from './api';
+import { formatSize } from './media';
 
 export type ConnState = 'connecting' | 'open' | 'reconnecting' | 'failed';
 
+export interface OutgoingFile {
+  kind: FileKind;
+  blob: Blob;
+  name: string;
+  mime: string;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+}
+
 export interface PendingMessage {
   clientId: string;
+  kind: 'text' | FileKind;
   body: string;
-  status: 'sending' | 'failed';
+  status: 'uploading' | 'sending' | 'failed';
   reason?: string;
+  progress?: number;
+  file?: OutgoingFile;
+  fileId?: string;
+  previewUrl?: string; // รูปที่กำลังส่ง แสดงจากเครื่องตัวเองไปก่อน
 }
 
 const ACK_TIMEOUT_MS = 10_000;
@@ -59,7 +76,11 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
       return out;
     });
     const ids = new Set(incoming.map((m) => m.id));
-    setPending((ps) => ps.filter((p) => !ids.has(p.clientId)));
+    setPending((ps) => ps.filter((p) => {
+      if (!ids.has(p.clientId)) return true;
+      if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
+      return false;
+    }));
     for (const id of ids) {
       const t = timersRef.current.get(id);
       if (t) { clearTimeout(t); timersRef.current.delete(id); }
@@ -80,7 +101,7 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
   }, []);
 
   const transmit = useCallback((p: PendingMessage) => {
-    if (!rawSend({ type: 'send', clientId: p.clientId, body: p.body })) {
+    if (!rawSend({ type: 'send', clientId: p.clientId, body: p.body, kind: p.kind, fileId: p.fileId })) {
       markFailed(p.clientId, 'ยังไม่ได้เชื่อมต่อกับห้อง (เน็ตหลุด?) — กดส่งใหม่เมื่อเชื่อมต่อแล้ว');
       return;
     }
@@ -127,7 +148,7 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
         initialSyncRef.current = lastSeqRef.current === 0;
         ws.send(JSON.stringify({ type: 'sync', afterSeq: lastSeqRef.current } satisfies ClientFrame));
         // ข้อความที่ค้าง "กำลังส่ง" ตอนเน็ตหลุด → ส่งอีกรอบ (รหัสเดิม ไม่ซ้ำ)
-        for (const p of pendingRef.current) if (p.status === 'sending') transmit(p);
+        for (const p of pendingRef.current) if (p.status === 'sending' && (p.kind === 'text' || p.fileId)) transmit(p);
         pingTimer = window.setInterval(() => rawSend({ type: 'ping' }), PING_MS);
       };
 
@@ -184,6 +205,7 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
       if (pingTimer) clearInterval(pingTimer);
       for (const t of timersRef.current.values()) clearTimeout(t);
       timersRef.current.clear();
+      for (const p of pendingRef.current) if (p.previewUrl) URL.revokeObjectURL(p.previewUrl);
       wsRef.current?.close(1000, 'leave');
       wsRef.current = null;
     };
@@ -194,22 +216,63 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
     const text = body.trim();
     if (!text) return 'พิมพ์ข้อความก่อนส่ง';
     if (text.length > MAX_MESSAGE_CHARS) return `ข้อความยาวเกิน ${MAX_MESSAGE_CHARS} ตัวอักษร`;
-    const p: PendingMessage = { clientId: makeClientId(), body: text, status: 'sending' };
+    const p: PendingMessage = { clientId: makeClientId(), kind: 'text', body: text, status: 'sending' };
     setPending((ps) => [...ps, p]);
     transmit(p);
     return null;
   }, [transmit]);
 
+  // ---------- ส่งไฟล์: อัปโหลด → ได้ fileId → ส่งข้อความผ่านห้อง ----------
+  const upload = useCallback(async (p: PendingMessage) => {
+    const f = p.file!;
+    const update = (patch: Partial<PendingMessage>) =>
+      setPending((ps) => ps.map((x) => (x.clientId === p.clientId ? { ...x, ...patch } : x)));
+    update({ status: 'uploading', progress: 0, reason: undefined });
+    try {
+      const { fileId } = await uploadFile(
+        roomId, f.blob,
+        { kind: f.kind, name: f.name, mime: f.mime, width: f.width, height: f.height, durationMs: f.durationMs },
+        (progress) => update({ progress }),
+      );
+      const ready: PendingMessage = { ...p, fileId, status: 'sending', progress: 100, reason: undefined };
+      update(ready);
+      transmit(ready);
+    } catch (e) {
+      update({ status: 'failed', reason: `อัปโหลดไม่สำเร็จ: ${errMsg(e)}` });
+    }
+  }, [roomId, transmit]);
+
+  const sendFile = useCallback((file: OutgoingFile, caption = ''): string | null => {
+    if (file.blob.size === 0) return 'ไฟล์ว่าง ส่งไม่ได้';
+    if (file.blob.size > MAX_BYTES[file.kind]) {
+      return `ไฟล์ใหญ่เกิน ${formatSize(MAX_BYTES[file.kind])} (ไฟล์นี้ ${formatSize(file.blob.size)})`;
+    }
+    if (caption.length > MAX_MESSAGE_CHARS) return `คำบรรยายยาวเกิน ${MAX_MESSAGE_CHARS} ตัวอักษร`;
+    const p: PendingMessage = {
+      clientId: makeClientId(), kind: file.kind, body: caption.trim(), status: 'uploading', progress: 0, file,
+      previewUrl: file.kind === 'image' ? URL.createObjectURL(file.blob) : undefined,
+    };
+    setPending((ps) => [...ps, p]);
+    void upload(p);
+    return null;
+  }, [upload]);
+
   const retry = useCallback((clientId: string) => {
     const p = pendingRef.current.find((x) => x.clientId === clientId);
     if (!p) return;
+    // ไฟล์ที่ยังอัปไม่ผ่าน → อัปใหม่ · อัปแล้ว/ข้อความ → ส่งผ่านห้องอีกรอบ (รหัสเดิม ไม่ซ้ำ)
+    if (p.kind !== 'text' && !p.fileId) { void upload(p); return; }
     const again = { ...p, status: 'sending' as const, reason: undefined };
     setPending((ps) => ps.map((x) => (x.clientId === clientId ? again : x)));
     transmit(again);
-  }, [transmit]);
+  }, [transmit, upload]);
 
   const discard = useCallback((clientId: string) => {
-    setPending((ps) => ps.filter((x) => x.clientId !== clientId));
+    setPending((ps) => ps.filter((x) => {
+      if (x.clientId !== clientId) return true;
+      if (x.previewUrl) URL.revokeObjectURL(x.previewUrl);
+      return false;
+    }));
   }, []);
 
   // ---------- บอกห้องว่าอ่านถึงไหนแล้ว ----------
@@ -236,5 +299,5 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
     }
   }, [roomId, messages, hasMore, loadingOlder, merge]);
 
-  return { messages, pending, conn, connError, hasMore, loadingOlder, send, retry, discard, markRead, loadOlder };
+  return { messages, pending, conn, connError, hasMore, loadingOlder, send, sendFile, retry, discard, markRead, loadOlder };
 }

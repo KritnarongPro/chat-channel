@@ -21,7 +21,7 @@ import type { Env } from './lib';
 // =====================================================================
 // 0. โครงตารางในห้อง — ต้องตรงกับ do-schema.sql (check:rules ตรวจเลขเวอร์ชัน)
 // =====================================================================
-export const DO_SCHEMA_VERSION = 1;
+export const DO_SCHEMA_VERSION = 2;
 
 const DO_MIGRATIONS: Record<number, string[]> = {
   1: [
@@ -36,16 +36,61 @@ const DO_MIGRATIONS: Record<number, string[]> = {
        created_at  TEXT NOT NULL
      )`,
   ],
+  // v2 (เฟส 2): เพิ่มชนิด image/file/voice + ข้อมูลไฟล์ — SQLite แก้ CHECK เดิมไม่ได้ จึงสร้างตารางใหม่แล้วย้ายข้อมูล
+  2: [
+    `CREATE TABLE messages_v2 (
+       seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+       id              TEXT NOT NULL UNIQUE,
+       sender_id       TEXT NOT NULL,
+       sender_name     TEXT NOT NULL,
+       kind            TEXT NOT NULL CHECK (kind IN ('text', 'image', 'file', 'voice')),
+       body            TEXT NOT NULL,
+       created_at      TEXT NOT NULL,
+       file_id         TEXT,
+       file_name       TEXT,
+       file_mime       TEXT,
+       file_size       INTEGER,
+       file_width      INTEGER,
+       file_height     INTEGER,
+       file_duration_ms INTEGER,
+       file_expires_at TEXT
+     )`,
+    `INSERT INTO messages_v2 (seq, id, sender_id, sender_name, kind, body, created_at)
+       SELECT seq, id, sender_id, sender_name, kind, body, created_at FROM messages`,
+    `DROP TABLE messages`,
+    `ALTER TABLE messages_v2 RENAME TO messages`,
+  ],
 };
 
 type MsgRow = {
   seq: number; id: string; sender_id: string; sender_name: string;
-  kind: 'text'; body: string; created_at: string;
+  kind: ChatMessage['kind']; body: string; created_at: string;
+  file_id: string | null; file_name: string | null; file_mime: string | null; file_size: number | null;
+  file_width: number | null; file_height: number | null; file_duration_ms: number | null; file_expires_at: string | null;
 };
 const msgOut = (r: MsgRow): ChatMessage => ({
   seq: r.seq, id: r.id, senderId: r.sender_id, senderName: r.sender_name,
   kind: r.kind, body: r.body, createdAt: r.created_at,
+  file: r.file_id
+    ? {
+        id: r.file_id, name: r.file_name ?? '', mime: r.file_mime ?? '', size: r.file_size ?? 0,
+        width: r.file_width, height: r.file_height, durationMs: r.file_duration_ms, expiresAt: r.file_expires_at ?? '',
+      }
+    : null,
 });
+
+/** ข้อความย่อสำหรับหน้ารายการแชท */
+const PREVIEW: Record<ChatMessage['kind'], string> = { text: '', image: '[รูปภาพ]', file: '[ไฟล์]', voice: '[ข้อความเสียง]' };
+function previewOf(m: ChatMessage): string {
+  if (m.kind === 'text') return m.body.slice(0, 120);
+  const label = m.kind === 'file' && m.file ? `[ไฟล์] ${m.file.name}` : PREVIEW[m.kind];
+  return (m.body ? `${label} ${m.body}` : label).slice(0, 120);
+}
+
+type FileRow = {
+  id: string; room_id: string; uploader_id: string; kind: 'image' | 'file' | 'voice'; mime: string; name: string;
+  size: number; width: number | null; height: number | null; duration_ms: number | null; status: string; expires_at: string;
+};
 
 interface SocketInfo { userId: string; userName: string }
 
@@ -175,7 +220,7 @@ export class ChatRoom extends DurableObject<Env> {
         await this.handleRead(ws, info, frame.seq);
         return;
       case 'send':
-        await this.handleSend(ws, info, frame.clientId, frame.body);
+        await this.handleSend(ws, info, frame.clientId, frame.body, frame.kind ?? 'text', frame.fileId);
         return;
       default:
         this.send(ws, { type: 'error', code: 'UNKNOWN_TYPE', message: 'ไม่รู้จักคำสั่งนี้' });
@@ -213,18 +258,32 @@ export class ChatRoom extends DurableObject<Env> {
     this.send(ws, { type: 'sync', messages: rows.slice(0, SYNC_LIMIT).map(msgOut), hasMore: rows.length > SYNC_LIMIT });
   }
 
-  private async handleSend(ws: WebSocket, info: SocketInfo, clientId: unknown, body: unknown) {
+  private async handleSend(
+    ws: WebSocket, info: SocketInfo, clientId: unknown, body: unknown, kind: unknown, fileId: unknown,
+  ) {
     // ---------- ตรวจข้อมูล ----------
     if (typeof clientId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(clientId)) {
       this.send(ws, { type: 'error', code: 'BAD_CLIENT_ID', message: 'รหัสข้อความไม่ถูกต้อง' });
       return;
     }
-    if (typeof body !== 'string' || body.trim() === '') {
+    if (kind !== 'text' && kind !== 'image' && kind !== 'file' && kind !== 'voice') {
+      this.send(ws, { type: 'error', clientId, code: 'BAD_KIND', message: 'ชนิดข้อความไม่ถูกต้อง' });
+      return;
+    }
+    if (typeof body !== 'string') {
+      this.send(ws, { type: 'error', clientId, code: 'BAD_BODY', message: 'ข้อความไม่ถูกต้อง' });
+      return;
+    }
+    if (kind === 'text' && body.trim() === '') {
       this.send(ws, { type: 'error', clientId, code: 'EMPTY', message: 'ข้อความว่าง ส่งไม่ได้' });
       return;
     }
     if (body.length > MAX_MESSAGE_CHARS) {
       this.send(ws, { type: 'error', clientId, code: 'TOO_LONG', message: `ข้อความยาวเกิน ${MAX_MESSAGE_CHARS} ตัวอักษร` });
+      return;
+    }
+    if (kind !== 'text' && (typeof fileId !== 'string' || !fileId)) {
+      this.send(ws, { type: 'error', clientId, code: 'NO_FILE', message: 'ไม่พบไฟล์ที่จะส่ง กรุณาอัปโหลดใหม่' });
       return;
     }
 
@@ -235,16 +294,27 @@ export class ChatRoom extends DurableObject<Env> {
       return;
     }
 
+    // ---------- ไฟล์: ตรวจใน D1 แล้วจองไว้ (uploaded → attached) ก่อนบันทึกข้อความ ----------
+    let file: FileRow | null = null;
+    if (kind !== 'text') {
+      file = await this.claimFile(ws, clientId, info, kind, fileId as string);
+      if (!file) return;
+    }
+
     // ---------- บันทึก ----------
     let row: MsgRow;
     try {
       row = this.sql.exec<MsgRow>(
-        `INSERT INTO messages (id, sender_id, sender_name, kind, body, created_at)
-         VALUES (?, ?, ?, 'text', ?, ?) RETURNING *`,
-        clientId, info.userId, info.userName, body, nowThai(),
+        `INSERT INTO messages (id, sender_id, sender_name, kind, body, created_at,
+           file_id, file_name, file_mime, file_size, file_width, file_height, file_duration_ms, file_expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+        clientId, info.userId, info.userName, kind, body, nowThai(),
+        file?.id ?? null, file?.name ?? null, file?.mime ?? null, file?.size ?? null,
+        file?.width ?? null, file?.height ?? null, file?.duration_ms ?? null, file?.expires_at ?? null,
       ).one();
     } catch (err) {
       console.error('บันทึกข้อความไม่สำเร็จ', err);
+      if (file) await this.releaseFile(file.id);
       this.send(ws, { type: 'error', clientId, code: 'SAVE_FAILED', message: 'บันทึกข้อความไม่สำเร็จ กรุณากดส่งใหม่' });
       return;
     }
@@ -253,13 +323,59 @@ export class ChatRoom extends DurableObject<Env> {
     this.send(ws, { type: 'ack', clientId, seq: message.seq });
     this.broadcast({ type: 'message', message });
 
-    // ---------- อัปเดตหน้ารายการแชทใน D1 ----------
+    // ---------- อัปเดต D1: ลำดับข้อความของไฟล์ + หน้ารายการแชท ----------
+    if (file) await this.setFileSeq(ws, file.id, message.seq);
     await this.updateRoomSummary(ws, message);
   }
 
   // =====================================================================
   // 3. งานเขียนลง D1
   // =====================================================================
+  /** ตรวจว่าไฟล์เป็นของห้องนี้ + ผู้ส่งเป็นคนอัป + ยังไม่ถูกใช้ แล้วเปลี่ยนเป็น attached — ไม่ผ่านคืน null พร้อมแจ้งเหตุผล */
+  private async claimFile(ws: WebSocket, clientId: string, info: SocketInfo, kind: string, fileId: string): Promise<FileRow | null> {
+    const roomId = this.roomId;
+    let f: FileRow | null;
+    try {
+      f = await this.env.DB.prepare(`SELECT * FROM files WHERE id = ?`).bind(fileId).first<FileRow>();
+    } catch (err) {
+      console.error('อ่านข้อมูลไฟล์จาก D1 ไม่สำเร็จ', err);
+      this.send(ws, { type: 'error', clientId, code: 'DB_FAILED', message: 'ตรวจไฟล์ไม่สำเร็จ (ฐานข้อมูลขัดข้อง) กรุณากดส่งใหม่' });
+      return null;
+    }
+    const bad = (code: string, message: string) => { this.send(ws, { type: 'error', clientId, code, message }); return null; };
+    if (!f) return bad('FILE_NOT_FOUND', 'ไม่พบไฟล์ (อาจอัปไม่สำเร็จหรือถูกลบแล้ว) กรุณาเลือกไฟล์ใหม่');
+    if (f.room_id !== roomId) return bad('FILE_OTHER_ROOM', 'ไฟล์นี้อัปไว้ในห้องอื่น');
+    if (f.uploader_id !== info.userId) return bad('FILE_NOT_YOURS', 'ส่งได้เฉพาะไฟล์ที่คุณอัปเอง');
+    if (f.kind !== kind) return bad('FILE_KIND', 'ชนิดไฟล์ไม่ตรงกับข้อความ');
+    if (f.status !== 'uploaded') return bad('FILE_USED', 'ไฟล์นี้ถูกส่งไปแล้วหรือหมดอายุ');
+    try {
+      const res = await this.env.DB.prepare(`UPDATE files SET status = 'attached' WHERE id = ? AND status = 'uploaded'`).bind(f.id).run();
+      if (res.meta.changes !== 1) return bad('FILE_USED', 'ไฟล์นี้ถูกส่งไปแล้ว');
+    } catch (err) {
+      console.error('จองไฟล์ใน D1 ไม่สำเร็จ', err);
+      return bad('DB_FAILED', 'บันทึกสถานะไฟล์ไม่สำเร็จ กรุณากดส่งใหม่');
+    }
+    return f;
+  }
+
+  /** บันทึกข้อความไม่สำเร็จ → คืนสถานะไฟล์ให้ส่งใหม่ได้ */
+  private async releaseFile(fileId: string) {
+    try {
+      await this.env.DB.prepare(`UPDATE files SET status = 'uploaded' WHERE id = ? AND status = 'attached' AND message_seq IS NULL`).bind(fileId).run();
+    } catch (err) {
+      console.error('คืนสถานะไฟล์ไม่สำเร็จ (ไฟล์จะถูกเก็บกวาดภายหลัง)', fileId, err);
+    }
+  }
+
+  private async setFileSeq(ws: WebSocket, fileId: string, seq: number) {
+    try {
+      await this.env.DB.prepare(`UPDATE files SET message_seq = ? WHERE id = ?`).bind(seq, fileId).run();
+    } catch (err) {
+      console.error('บันทึกลำดับข้อความของไฟล์ไม่สำเร็จ', err);
+      this.send(ws, { type: 'warning', code: 'FILE_SEQ_FAILED', message: 'ส่งไฟล์แล้ว แต่บันทึกข้อมูลอ้างอิงของไฟล์ไม่ครบ (ไฟล์ยังเปิดได้ตามปกติ)' });
+    }
+  }
+
   private async updateRoomSummary(ws: WebSocket, m: ChatMessage) {
     const roomId = this.roomId;
     if (!roomId) {
@@ -271,7 +387,7 @@ export class ChatRoom extends DurableObject<Env> {
         this.env.DB.prepare(
           `UPDATE rooms SET last_seq = ?, last_message_at = ?, last_message_preview = ?, last_sender_name = ?
            WHERE id = ? AND last_seq < ?`,
-        ).bind(m.seq, m.createdAt, m.body.slice(0, 120), m.senderName, roomId, m.seq),
+        ).bind(m.seq, m.createdAt, previewOf(m), m.senderName, roomId, m.seq),
         // ผู้ส่งถือว่าอ่านข้อความตัวเองแล้ว
         this.env.DB.prepare(
           `UPDATE room_members SET last_read_seq = MAX(last_read_seq, ?) WHERE room_id = ? AND user_id = ?`,

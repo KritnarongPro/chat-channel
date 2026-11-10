@@ -40,6 +40,13 @@
     }
   ],
 
+  // ---------- R2 (ตัวไฟล์ รูป/ไฟล์/เสียง) ----------
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "chat-channel" }],
+
+  // ---------- งานตามเวลา ----------
+  // 20:00 UTC = 03:00 เวลาไทย ทุกวัน: ลบไฟล์ที่ครบ 180 วัน + ไฟล์ที่อัปแล้วไม่ได้ส่ง (เกิน 1 วัน)
+  "triggers": { "crons": ["0 20 * * *"] },
+
   // ---------- Durable Object: 1 ห้อง = 1 ตัว (WebSocket + ข้อความเก็บใน SQLite ของห้อง) ----------
   "durable_objects": {
     "bindings": [{ "name": "ROOM", "class_name": "ChatRoom" }]

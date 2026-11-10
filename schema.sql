@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0001_init.sql
+-- ล่าสุดถึง: 0002_files.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -54,3 +54,24 @@ CREATE TABLE room_members (
   PRIMARY KEY (room_id, user_id)
 );
 CREATE INDEX idx_room_members_user ON room_members(user_id);
+
+-- ---------- ไฟล์ในห้อง (0002) — ตัวไฟล์อยู่ใน R2 · status: uploaded / attached / expired ----------
+CREATE TABLE files (
+  id           TEXT PRIMARY KEY,
+  room_id      TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  uploader_id  TEXT NOT NULL REFERENCES users(id),
+  r2_key       TEXT NOT NULL UNIQUE,
+  kind         TEXT NOT NULL CHECK (kind IN ('image', 'file', 'voice')),
+  mime         TEXT NOT NULL,
+  name         TEXT NOT NULL,
+  size         INTEGER NOT NULL,
+  width        INTEGER,
+  height       INTEGER,
+  duration_ms  INTEGER,
+  status       TEXT NOT NULL DEFAULT 'uploaded' CHECK (status IN ('uploaded', 'attached', 'expired')),
+  message_seq  INTEGER,
+  created_at   TEXT NOT NULL,
+  expires_at   TEXT NOT NULL
+);
+CREATE INDEX idx_files_room ON files(room_id);
+CREATE INDEX idx_files_status_expires ON files(status, expires_at);

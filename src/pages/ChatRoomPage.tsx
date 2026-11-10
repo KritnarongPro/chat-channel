@@ -1,6 +1,7 @@
 // =====================================================================
 // ChatRoomPage.tsx — ห้องแชท: ข้อความเรียลไทม์ + สถานะส่ง/ส่งไม่สำเร็จ + สถานะการเชื่อมต่อ
 // กลุ่ม: แตะหัวห้องเพื่อดู/เพิ่มสมาชิก
+// เฟส 2: ส่งรูป (ย่อก่อนส่ง) / ส่งเป็นไฟล์ (ชัดเต็ม) / ไฟล์ / ข้อความเสียง
 // =====================================================================
 
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -11,7 +12,10 @@ import { Room, RoomMember, User, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
-import { useRoomSocket } from '../useRoomSocket';
+import { OutgoingFile, useRoomSocket } from '../useRoomSocket';
+import MessageContent from '../MessageContent';
+import VoiceRecorder from '../VoiceRecorder';
+import { formatSize, prepareImage } from '../media';
 
 export default function ChatRoomPage() {
   const { id = '' } = useParams();
@@ -23,6 +27,10 @@ export default function ChatRoomPage() {
   const [showMembers, setShowMembers] = useState(false);
   const [text, setText] = useState('');
   const [inputError, setInputError] = useState('');
+  const [recording, setRecording] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  const imageInput = useRef<HTMLInputElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const stickBottom = useRef(true);
 
@@ -73,6 +81,37 @@ export default function ChatRoomPage() {
     stickBottom.current = true;
   }
 
+  function queueFile(f: OutgoingFile) {
+    const err = s.sendFile(f, text);
+    if (err) { notify('error', `${f.name}: ${err}`); return; }
+    setText(''); // ข้อความในช่องพิมพ์กลายเป็นคำบรรยายใต้ไฟล์
+    stickBottom.current = true;
+  }
+
+  // ---------- รูป: ย่อก่อนส่ง ----------
+  async function onPickImages(files: FileList | null) {
+    if (!files?.length) return;
+    setPreparing(true);
+    for (const file of Array.from(files)) {
+      try {
+        const img = await prepareImage(file);
+        queueFile({ kind: 'image', blob: img.blob, name: img.name, mime: img.mime, width: img.width, height: img.height });
+      } catch (e) {
+        notify('error', `${file.name}: ${e instanceof Error ? e.message : 'เตรียมรูปไม่สำเร็จ'}`);
+      }
+    }
+    setPreparing(false);
+    if (imageInput.current) imageInput.current.value = '';
+  }
+
+  // ---------- ส่งเป็นไฟล์ (ไม่ย่อ — ใช้กับรูปที่ต้องการชัดเต็ม และไฟล์ทุกชนิด) ----------
+  function onPickFiles(files: FileList | null) {
+    for (const file of Array.from(files ?? [])) {
+      queueFile({ kind: 'file', blob: file, name: file.name, mime: file.type || 'application/octet-stream' });
+    }
+    if (fileInput.current) fileInput.current.value = '';
+  }
+
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
     // Enter = ส่ง · Shift+Enter = ขึ้นบรรทัดใหม่ (บนคอมพิวเตอร์)
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
@@ -121,7 +160,7 @@ export default function ChatRoomPage() {
               <div className={`bubble-row ${mine ? 'mine' : ''}`}>
                 <div className="bubble">
                   {!mine && isGroup && <div className="bubble-name">{m.senderName}</div>}
-                  <div className="bubble-body">{m.body}</div>
+                  <MessageContent m={m} />
                   <div className="bubble-meta">{thaiClock(m.createdAt)}</div>
                 </div>
               </div>
@@ -131,8 +170,17 @@ export default function ChatRoomPage() {
         {s.pending.map((p) => (
           <div key={p.clientId} className="bubble-row mine">
             <div className={`bubble ${p.status === 'failed' ? 'bubble-failed' : 'bubble-sending'}`}>
-              <div className="bubble-body">{p.body}</div>
-              {p.status === 'sending' ? (
+              {p.previewUrl && <img className="msg-image" src={p.previewUrl} alt="" />}
+              {p.file && p.kind !== 'image' && (
+                <div className="small">{p.kind === 'voice' ? '🎤 ข้อความเสียง' : `📄 ${p.file.name}`} · {formatSize(p.file.blob.size)}</div>
+              )}
+              {p.body && <div className="bubble-body">{p.body}</div>}
+              {p.status === 'uploading' ? (
+                <div className="bubble-meta">
+                  กำลังอัปโหลด {p.progress ?? 0}%
+                  <div className="progress"><div style={{ width: `${p.progress ?? 0}%` }} /></div>
+                </div>
+              ) : p.status === 'sending' ? (
                 <div className="bubble-meta">กำลังส่ง…</div>
               ) : (
                 <div className="bubble-fail">
@@ -148,6 +196,22 @@ export default function ChatRoomPage() {
 
       <form className="composer" onSubmit={submit}>
         {inputError && <p className="error-text small">{inputError}</p>}
+        {preparing && <p className="small muted">กำลังย่อรูป…</p>}
+        {recording ? (
+          <VoiceRecorder
+            onDone={(f) => { setRecording(false); queueFile(f); }}
+            onCancel={() => setRecording(false)}
+            onError={(msg) => { setRecording(false); notify('error', msg); }}
+          />
+        ) : (
+        <>
+        <div className="composer-tools">
+          <button type="button" className="tool" onClick={() => imageInput.current?.click()} disabled={s.conn === 'failed'}>🖼 รูป</button>
+          <button type="button" className="tool" onClick={() => fileInput.current?.click()} disabled={s.conn === 'failed'}>📎 ส่งเป็นไฟล์</button>
+          <button type="button" className="tool" onClick={() => setRecording(true)} disabled={s.conn === 'failed'}>🎤 เสียง</button>
+          <input ref={imageInput} type="file" accept="image/*" multiple hidden onChange={(e) => void onPickImages(e.target.files)} />
+          <input ref={fileInput} type="file" multiple hidden onChange={(e) => onPickFiles(e.target.files)} />
+        </div>
         <div className="composer-row">
           <textarea
             value={text}
@@ -159,6 +223,8 @@ export default function ChatRoomPage() {
           />
           <button className="btn" disabled={s.conn === 'failed'}>ส่ง</button>
         </div>
+        </>
+        )}
       </form>
 
       {showMembers && room && (
