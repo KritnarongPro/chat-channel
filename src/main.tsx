@@ -5,7 +5,7 @@
 
 import { StrictMode, useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router';
 import { ApiError, Me, api, errMsg } from './api';
 import { NoticeProvider } from './notice';
 import { MeContext } from './me';
@@ -22,6 +22,7 @@ import AdminBotsPage from './pages/AdminBotsPage';
 import AdminFormsPage from './pages/AdminFormsPage';
 import FormFillPage from './pages/FormFillPage';
 import OrdersPage from './pages/OrdersPage';
+import JoinPage from './pages/JoinPage';
 import './styles.css';
 
 function App() {
@@ -58,7 +59,17 @@ function App() {
 
   useEffect(() => { void reload(); }, [reload]);
 
+  const location = useLocation();
   if (state === 'loading') return <div className="center muted">กำลังโหลด…</div>;
+
+  // ลิงก์เชิญ /join/<รหัส>: เปิดได้ทั้งยังไม่ล็อกอิน / รออนุมัติ / ใช้งานอยู่
+  if (location.pathname.startsWith('/join/') && state !== 'error') {
+    return (
+      <Routes>
+        <Route path="/join/:code" element={<JoinPage me={state === 'ready' ? me : null} reload={reload} />} />
+      </Routes>
+    );
+  }
   if (state === 'error') {
     return (
       <div className="center">

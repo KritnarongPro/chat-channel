@@ -16,6 +16,7 @@ import { useNotify } from '../notice';
 import { OutgoingFile, useRoomSocket } from '../useRoomSocket';
 import MessageContent from '../MessageContent';
 import VoiceRecorder from '../VoiceRecorder';
+import InvitePanel from '../InvitePanel';
 import { formatSize, prepareImage } from '../media';
 
 export default function ChatRoomPage() {
@@ -387,6 +388,7 @@ function MembersPanel({ room, members, onClose, onChanged }: {
               ))}
             </ul>
             {canAdd && <button className="btn btn-block" onClick={() => void openAdd()}>+ เพิ่มสมาชิก</button>}
+            {canAdd && room.type !== 'dm' && <InvitePanel roomId={room.id} roomTitle={room.title} />}
             {room.type === 'channel' && !isOwner && (
               <button className="btn btn-ghost btn-block" onClick={() => void leave()}>เลิกติดตามชาเนลนี้</button>
             )}

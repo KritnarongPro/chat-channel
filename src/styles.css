@@ -152,3 +152,14 @@ select { font: inherit; width: 100%; padding: 9px 10px; border: 1px solid var(--
 .row-actions.wrap { flex-wrap: wrap; }
 .token { display: block; word-break: break-all; background: #fff; padding: 8px; border-radius: 8px; font-size: 13px; }
 .pad { padding: 12px 14px; }
+
+/* ---------- ลิงก์เชิญ ---------- */
+.invite-panel { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--border); }
+.invite-item { border: 1px solid var(--border); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+.invite-item.dead { opacity: .6; }
+.btn-line-small { background: var(--line); }
+.qr { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.join { max-width: 420px; margin: 0 auto; }
+.join-icon { font-size: 56px; margin-top: 8vh; }
+.join h2 { margin: 0; }
+.join-btn { max-width: 320px; }

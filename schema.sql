@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0004_bots_forms.sql
+-- ล่าสุดถึง: 0005_invites.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -152,3 +152,24 @@ CREATE TABLE orders (
 );
 CREATE INDEX idx_orders_status ON orders(status, created_at);
 CREATE INDEX idx_orders_user ON orders(user_id, created_at);
+
+-- ---------- ลิงก์เชิญ (0005) ----------
+CREATE TABLE invite_links (
+  code        TEXT PRIMARY KEY,
+  room_id     TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  created_by  TEXT NOT NULL REFERENCES users(id),
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT,
+  max_uses    INTEGER,
+  use_count   INTEGER NOT NULL DEFAULT 0,
+  revoked_at  TEXT
+);
+CREATE INDEX idx_invite_links_room ON invite_links(room_id);
+
+-- ---------- ใครเข้ามาผ่านลิงก์ไหน ----------
+CREATE TABLE invite_uses (
+  code     TEXT NOT NULL REFERENCES invite_links(code) ON DELETE CASCADE,
+  user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  used_at  TEXT NOT NULL,
+  PRIMARY KEY (code, user_id)
+);

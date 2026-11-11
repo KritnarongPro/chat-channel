@@ -126,10 +126,27 @@ if (!/if \(!room\.senderIsBot\) await this\.queueBots/.test(room)) fail('BUGS-07
 // ---------- BUGS-08 ฟอร์ม: worker ต้องตรวจคำตอบซ้ำเอง (ห้ามเชื่อหน้าเว็บ) ----------
 if (!/checkSubmission\(form\.fields, body\.values\)/.test(index)) fail('BUGS-08', 'submitForm ต้องเรียก checkSubmission ก่อนบันทึกออเดอร์');
 
+// ---------- BUGS-09 ลิงก์เชิญ: จองที่ต้องมีเงื่อนไขในคำสั่งเดียว (กันคนกดพร้อมกันเกินจำนวน/ใช้ลิงก์ที่หมดอายุ) ----------
+{
+  const inv = read(join('worker', 'invites.ts'));
+  if (!/use_count < max_uses/.test(inv) || !/revoked_at IS NULL/.test(inv) || !/meta\.changes !== 1/.test(inv)) {
+    fail('BUGS-09', 'worker/invites.ts ต้องจองที่ด้วย UPDATE ... WHERE (เงื่อนไขครบ) แล้วตรวจ meta.changes');
+  }
+}
+
+// ---------- BUGS-10 ลิงก์เชิญ: สมาชิกเดิมกดลิงก์ที่เต็ม/หมดอายุ ต้องเข้าห้องได้ (ตรวจสมาชิกก่อนตรวจสถานะลิงก์) ----------
+{
+  const inv = read(join('worker', 'invites.ts'));
+  const body = inv.slice(inv.indexOf('export async function redeemInvite'));
+  const iMember = body.indexOf('if (member)');
+  const iProblem = body.indexOf('const problem = inviteProblem(inv)');
+  if (iMember < 0 || iProblem < 0 || iMember > iProblem) fail('BUGS-10', 'redeemInvite ต้องตรวจ "เป็นสมาชิกอยู่แล้ว" ก่อน inviteProblem');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..05, BUGS-01..08)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..05, BUGS-01..10)');
