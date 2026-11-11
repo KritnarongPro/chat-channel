@@ -6,6 +6,7 @@
 //   1. Router + ตาราง endpoint แยกหมวด
 //   2. Handlers: health / auth / setup / admin / users / rooms / channels / messages / files / push
 //                bots (แอดมินจัดการ) / bot-api (บอทเรียกด้วย token) / forms / orders   ← เฟส 4
+//                invites (ลิงก์เชิญเข้าชาเนล/กลุ่ม)
 //   3. ตัวช่วยเรื่องห้อง (ตรวจสมาชิก, สิทธิ์โพสต์)
 //   4. Entry point (fetch + scheduled: ลบไฟล์ครบ 180 วัน + queue: ส่งแจ้งเตือน)
 //
@@ -26,6 +27,7 @@ import {
 } from './lib';
 import { FormField, OrderStatus, ORDER_STATUS_TH, checkFormDef, checkSubmission } from '../shared/forms';
 import { lineCallback, lineConfigError, lineStart } from './auth-line';
+import { InviteRow, inviteProblem, loadInvite, redeemInvite } from './invites';
 
 export { ChatRoom } from './room';
 
@@ -47,7 +49,7 @@ const routes: Route[] = [
   { method: 'GET',  pattern: '/api/health',                   need: 'public', handler: health },
 
   // ---------- auth (LINE Login) ----------
-  { method: 'GET',  pattern: '/api/auth/line/start',          need: 'public', handler: (c) => lineStart(c.env) },
+  { method: 'GET',  pattern: '/api/auth/line/start',          need: 'public', handler: (c) => lineStart(c.env, c.url.searchParams.get('invite')) },
   { method: 'GET',  pattern: '/api/auth/line/callback',       need: 'public', handler: (c) => lineCallback(c.req, c.env) },
   { method: 'POST', pattern: '/api/auth/logout',              need: 'public', handler: logout },
   { method: 'GET',  pattern: '/api/me',                       need: 'any',    handler: me },
@@ -117,6 +119,13 @@ const routes: Route[] = [
   // ---------- orders: แอดมินเห็นทั้งหมด + เปลี่ยนสถานะ · ผู้ใช้เห็นของตัวเอง ----------
   { method: 'GET',  pattern: '/api/orders',                   need: 'active', handler: listOrders },
   { method: 'POST', pattern: '/api/orders/:orderId/status',   need: 'admin',  handler: adminSetOrderStatus },
+
+  // ---------- invites: เจ้าของ/แอดมินห้องสร้าง-ยกเลิก · ใครมีลิงก์ก็ดูข้อมูลห้องได้ · ล็อกอินแล้ว (รออนุมัติก็ได้) ใช้ลิงก์ได้ ----------
+  { method: 'GET',  pattern: '/api/rooms/:id/invites',        need: 'active', handler: listInvites },
+  { method: 'POST', pattern: '/api/rooms/:id/invites',        need: 'active', handler: createInvite },
+  { method: 'POST', pattern: '/api/rooms/:id/invites/:code/revoke', need: 'active', handler: revokeInvite },
+  { method: 'GET',  pattern: '/api/invites/:code',            need: 'public', handler: inviteInfo },
+  { method: 'POST', pattern: '/api/invites/:code/join',       need: 'any',    handler: joinByInvite },
 ];
 
 function match(pattern: string, path: string): Record<string, string> | null {
@@ -1119,6 +1128,97 @@ async function queueOrderEvent(env: Env, botId: string, type: 'order' | 'order_s
     console.error('ส่งออเดอร์ให้บอทไม่สำเร็จ', err);
     warnings.push('บันทึกแล้ว แต่ส่งข้อมูลออเดอร์ให้บอทไม่สำเร็จ');
   }
+}
+
+// ---------- invites ----------
+const INVITE_EXPIRY: Record<string, number | null> = { '1d': 1, '7d': 7, '30d': 30, never: null };
+
+/** สร้าง/ดู/ยกเลิกลิงก์ได้เฉพาะเจ้าของหรือแอดมินของกลุ่ม/ชาเนล */
+async function requireRoomAdmin(c: Ctx) {
+  const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
+  if (room.type === 'dm') throw new ApiError(400, 'NOT_GROUP', 'แชท 1:1 ใช้ลิงก์เชิญไม่ได้');
+  if (role !== 'owner' && role !== 'admin') throw new ApiError(403, 'NOT_ROOM_ADMIN', 'เฉพาะเจ้าของ/แอดมินของห้องเท่านั้นที่จัดการลิงก์เชิญได้');
+  return room;
+}
+
+async function listInvites(c: Ctx) {
+  await requireRoomAdmin(c);
+  const links = await db('อ่านลิงก์เชิญ', () =>
+    c.env.DB.prepare(
+      `SELECT i.*, u.display_name AS creator_name FROM invite_links i JOIN users u ON u.id = i.created_by
+       WHERE i.room_id = ? ORDER BY i.created_at DESC`,
+    ).bind(c.params.id).all<InviteRow & { creator_name: string }>(),
+  );
+  const uses = await db('อ่านคนที่เข้าผ่านลิงก์', () =>
+    c.env.DB.prepare(
+      `SELECT iu.code, iu.used_at, u.display_name FROM invite_uses iu JOIN invite_links i ON i.code = iu.code
+       JOIN users u ON u.id = iu.user_id WHERE i.room_id = ? ORDER BY iu.used_at DESC`,
+    ).bind(c.params.id).all<{ code: string; used_at: string; display_name: string }>(),
+  );
+  return ok({
+    invites: links.results.map((i) => ({
+      code: i.code, url: `${c.env.APP_URL}/join/${i.code}`, createdBy: i.creator_name, createdAt: i.created_at,
+      expiresAt: i.expires_at, maxUses: i.max_uses, useCount: i.use_count, revokedAt: i.revoked_at,
+      problem: inviteProblem(i)?.message ?? null,
+      joined: uses.results.filter((u) => u.code === i.code).map((u) => ({ name: u.display_name, at: u.used_at })),
+    })),
+  });
+}
+
+async function createInvite(c: Ctx) {
+  await requireRoomAdmin(c);
+  const body = await readJson<{ expiresIn?: unknown; maxUses?: unknown }>(c.req);
+  const expiresIn = typeof body.expiresIn === 'string' ? body.expiresIn : '7d';
+  if (!(expiresIn in INVITE_EXPIRY)) throw new ApiError(400, 'BAD_EXPIRY', 'อายุลิงก์ต้องเป็น 1d, 7d, 30d หรือ never');
+  let maxUses: number | null = null;
+  if (body.maxUses !== null && body.maxUses !== undefined && body.maxUses !== '') {
+    const n = Number(body.maxUses);
+    if (!Number.isInteger(n) || n < 1 || n > 10000) throw new ApiError(400, 'BAD_MAX_USES', 'จำนวนคนต้องเป็นจำนวนเต็ม 1–10,000 (หรือเว้นว่าง = ไม่จำกัด)');
+    maxUses = n;
+  }
+  const days = INVITE_EXPIRY[expiresIn];
+  const code = randomToken(9); // 12 ตัวอักษร
+  const now = nowThai();
+  await db('สร้างลิงก์เชิญ', () =>
+    c.env.DB.prepare(
+      `INSERT INTO invite_links (code, room_id, created_by, created_at, expires_at, max_uses) VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(code, c.params.id, c.user!.id, now, days ? thaiAfter(days * 86400_000) : null, maxUses).run(),
+  );
+  return ok({ code, url: `${c.env.APP_URL}/join/${code}` }, 201);
+}
+
+async function revokeInvite(c: Ctx) {
+  await requireRoomAdmin(c);
+  const res = await db('ยกเลิกลิงก์เชิญ', () =>
+    c.env.DB.prepare(`UPDATE invite_links SET revoked_at = ? WHERE code = ? AND room_id = ? AND revoked_at IS NULL`)
+      .bind(nowThai(), c.params.code, c.params.id).run(),
+  );
+  if (res.meta.changes !== 1) throw new ApiError(404, 'INVITE_NOT_FOUND', 'ไม่พบลิงก์นี้ หรือถูกยกเลิกไปแล้ว');
+  return ok({ revoked: true });
+}
+
+/** ข้อมูลห้องของลิงก์ (ไม่ต้องล็อกอิน) — แสดงในหน้า /join ก่อนกดเข้าร่วม */
+async function inviteInfo(c: Ctx) {
+  const inv = await loadInvite(c.env, c.params.code);
+  const problem = inviteProblem(inv);
+  if (!inv) return ok({ valid: false, problem: problem!.message, problemCode: problem!.code });
+  const room = await db('อ่านห้องของลิงก์', () =>
+    c.env.DB.prepare(
+      `SELECT r.type, r.title, r.description, (SELECT COUNT(*) FROM room_members m WHERE m.room_id = r.id) AS member_count
+       FROM rooms r WHERE r.id = ?`,
+    ).bind(inv.room_id).first<{ type: string; title: string | null; description: string | null; member_count: number }>(),
+  );
+  if (!room) return ok({ valid: false, problem: 'ห้องของลิงก์นี้ไม่มีแล้ว', problemCode: 'INVITE_NOT_FOUND' });
+  return ok({
+    valid: !problem, problem: problem?.message ?? null, problemCode: problem?.code ?? null,
+    room: { type: room.type, title: room.title ?? (room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม'), description: room.description, memberCount: room.member_count },
+    expiresAt: inv.expires_at,
+  });
+}
+
+async function joinByInvite(c: Ctx) {
+  const r = await redeemInvite(c.env, c.params.code, c.user!);
+  return ok(r);
 }
 
 // =====================================================================

@@ -4,11 +4,14 @@
 //   /api/auth/line/start     → สร้าง state + nonce เก็บใน cookie แล้วพาไปหน้า LINE
 //   /api/auth/line/callback  → ตรวจ state → แลก code เป็น id_token → ให้ LINE ตรวจ id_token (+nonce)
 //                              → สร้าง/อัปเดตผู้ใช้ → สร้าง session cookie → กลับหน้าแรก
+//   ล็อกอินผ่านลิงก์เชิญ (?invite=รหัส): หลังล็อกอินใช้ลิงก์ทันที → อนุมัติ + เข้าห้อง → พาไปห้องนั้น
+//                                       ลิงก์ใช้ไม่ได้ → พาไปหน้า /join/<รหัส>?error=รหัส (บอกเหตุผล)
 // ล้มเหลวทุกจุด → พากลับหน้าแรกพร้อม ?login_error=รหัส (หน้าเว็บแสดงเหตุผลภาษาไทย)
 // =====================================================================
 
 import { nowThai } from '../shared/time';
-import { Env, createSession, newId, randomToken, readCookie } from './lib';
+import { ApiError, Env, createSession, newId, randomToken, readCookie } from './lib';
+import { redeemInvite } from './invites';
 
 const LINE_AUTHORIZE = 'https://access.line.me/oauth2/v2.1/authorize';
 const LINE_TOKEN = 'https://api.line.me/oauth2/v2.1/token';
@@ -38,9 +41,10 @@ export function lineConfigError(env: Env): string | null {
 }
 
 // ---------- เริ่มล็อกอิน ----------
-export function lineStart(env: Env): Response {
+export function lineStart(env: Env, invite?: string | null): Response {
   const cfgErr = lineConfigError(env);
   if (cfgErr) return backToApp(env, cfgErr);
+  const inviteCode = invite && /^[A-Za-z0-9_-]{6,40}$/.test(invite) ? invite : '';
 
   const state = randomToken(16);
   const nonce = randomToken(16);
@@ -56,7 +60,7 @@ export function lineStart(env: Env): Response {
     status: 302,
     headers: {
       Location: url.toString(),
-      'Set-Cookie': `${STATE_COOKIE}=${state}.${nonce}; Path=/api/auth/line; Max-Age=${STATE_MAX_AGE}; HttpOnly; Secure; SameSite=Lax`,
+      'Set-Cookie': `${STATE_COOKIE}=${state}.${nonce}.${inviteCode}; Path=/api/auth/line; Max-Age=${STATE_MAX_AGE}; HttpOnly; Secure; SameSite=Lax`,
     },
   });
 }
@@ -73,7 +77,7 @@ export async function lineCallback(req: Request, env: Env): Promise<Response> {
   const state = url.searchParams.get('state');
   const saved = readCookie(req, STATE_COOKIE);
   if (!code || !state || !saved) return backToApp(env, 'STATE_MISSING');
-  const [savedState, nonce] = saved.split('.');
+  const [savedState, nonce, inviteCode] = saved.split('.');
   if (state !== savedState || !nonce) return backToApp(env, 'STATE_MISMATCH');
 
   // ---------- แลก code → id_token ----------
@@ -125,11 +129,13 @@ export async function lineCallback(req: Request, env: Env): Promise<Response> {
   const now = nowThai();
   const name = (profile.name || 'ผู้ใช้ LINE').slice(0, 80);
   let userId: string;
+  let status: 'pending' | 'active' | 'blocked' = 'pending';
   try {
     const existing = await env.DB.prepare(`SELECT id, status FROM users WHERE line_user_id = ?`)
       .bind(profile.sub).first<{ id: string; status: string }>();
     if (existing) {
       if (existing.status === 'blocked') return backToApp(env, 'BLOCKED');
+      status = existing.status as typeof status;
       await env.DB.prepare(`UPDATE users SET display_name = ?, picture_url = ?, updated_at = ? WHERE id = ?`)
         .bind(name, profile.picture ?? null, now, existing.id).run();
       userId = existing.id;
@@ -155,5 +161,21 @@ export async function lineCallback(req: Request, env: Env): Promise<Response> {
   }
   const headers = new Headers();
   headers.append('Set-Cookie', cookie);
+
+  // ---------- มาจากลิงก์เชิญ → ใช้ลิงก์เลย ----------
+  if (inviteCode) {
+    let path: string;
+    try {
+      const r = await redeemInvite(env, inviteCode, { id: userId, status });
+      path = `/room/${encodeURIComponent(r.roomId)}`;
+    } catch (err) {
+      const code = err instanceof ApiError ? err.code : 'INVITE_FAILED';
+      if (!(err instanceof ApiError)) console.error('ใช้ลิงก์เชิญหลังล็อกอินไม่สำเร็จ', err);
+      path = `/join/${encodeURIComponent(inviteCode)}?error=${encodeURIComponent(code)}`;
+    }
+    headers.set('Location', new URL(path, env.APP_URL).toString());
+    headers.append('Set-Cookie', `${STATE_COOKIE}=; Path=/api/auth/line; Max-Age=0; HttpOnly; Secure; SameSite=Lax`);
+    return new Response(null, { status: 302, headers });
+  }
   return backToApp(env, undefined, headers);
 }
