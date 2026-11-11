@@ -112,8 +112,8 @@ export async function encryptPayload(p256dh: string, auth: string, plaintext: Ui
 // =====================================================================
 // 4. ส่งถึง 1 เครื่อง
 // =====================================================================
-export interface PushPayload { title: string; body: string; url: string; tag: string }
-export interface Subscription { id: string; endpoint: string; p256dh: string; auth: string }
+export interface PushPayload { title: string; body: string; url: string; tag: string; badge?: number }
+export interface Subscription { id: string; endpoint: string; p256dh: string; auth: string; user_id?: string }
 export type SendResult = { ok: true } | { ok: false; gone: boolean; reason: string };
 
 export async function sendPush(env: Env, keys: VapidKeys, sub: Subscription, payload: PushPayload): Promise<SendResult> {
@@ -148,7 +148,10 @@ export async function sendPush(env: Env, keys: VapidKeys, sub: Subscription, pay
 }
 
 /** ส่งให้ทุกเครื่องของผู้ใช้ชุดหนึ่ง แล้วบันทึกผลลง push_subscriptions — คืนจำนวน ส่งได้/ไม่ได้ */
-export async function sendToUsers(env: Env, userIds: string[], payload: PushPayload): Promise<{ sent: number; failed: number; errors: string[] }> {
+/** payload เป็นฟังก์ชันได้ = เนื้อหาแยกรายคน (เช่น ซ่อนเนื้อหา / ตัวเลขบนไอคอนของแต่ละคน) */
+export async function sendToUsers(
+  env: Env, userIds: string[], payload: PushPayload | ((userId: string) => PushPayload),
+): Promise<{ sent: number; failed: number; errors: string[] }> {
   const out = { sent: 0, failed: 0, errors: [] as string[] };
   if (userIds.length === 0) return out;
   const keys = await getVapidKeys(env);
@@ -156,7 +159,7 @@ export async function sendToUsers(env: Env, userIds: string[], payload: PushPayl
   for (let i = 0; i < userIds.length; i += 90) {
     const part = userIds.slice(i, i + 90);
     const rows = await env.DB.prepare(
-      `SELECT id, endpoint, p256dh, auth FROM push_subscriptions WHERE user_id IN (${part.map(() => '?').join(',')})`,
+      `SELECT id, endpoint, p256dh, auth, user_id FROM push_subscriptions WHERE user_id IN (${part.map(() => '?').join(',')})`,
     ).bind(...part).all<Subscription>();
     subs.push(...rows.results);
   }
@@ -166,7 +169,8 @@ export async function sendToUsers(env: Env, userIds: string[], payload: PushPayl
   // ส่งพร้อมกันครั้งละ 6 (ขีดจำกัดการเชื่อมต่อพร้อมกันของ Worker)
   for (let i = 0; i < subs.length; i += 6) {
     const chunk = subs.slice(i, i + 6);
-    const results = await Promise.all(chunk.map((s) => sendPush(env, keys, s, payload)));
+    const results = await Promise.all(chunk.map((s) =>
+      sendPush(env, keys, s, typeof payload === 'function' ? payload(s.user_id ?? '') : payload)));
     results.forEach((r, j) => {
       const s = chunk[j];
       if (r.ok) {
@@ -191,9 +195,17 @@ export async function sendToUsers(env: Env, userIds: string[], payload: PushPayl
 // 5. Queue consumer
 // =====================================================================
 /** งานใน queue: งานเก่าก่อนเฟส 4 ไม่มี type = งาน push */
-export type PushJob =
-  | { type?: 'push'; userIds: string[]; payload: PushPayload }
-  | { type: 'webhook'; botId: string; update: Record<string, unknown> };
+/** งานแจ้งเตือนข้อความใหม่ (ระบบแจ้งเตือนแบบ Telegram) — ตัดสินใจรายคนใน notifyUsers */
+export interface PushJobMessage {
+  type?: 'push';
+  userIds: string[];
+  payload: PushPayload;
+  roomId?: string;                              // งานเก่าก่อนระบบแจ้งเตือนใหม่ไม่มี → ส่งตรงแบบเดิม
+  roomType?: 'dm' | 'group' | 'channel';
+  silent?: boolean;                             // ส่งแบบเงียบ → ไม่เด้ง (แต่อัปเดตตัวเลข/รายการแชทในแอป)
+  important?: string[];                         // คนที่ถูก @ชื่อ หรือถูกตอบกลับ
+}
+export type PushJob = PushJobMessage | { type: 'webhook'; botId: string; update: Record<string, unknown> };
 
 export async function handlePushQueue(batch: MessageBatch<PushJob>, env: Env) {
   for (const msg of batch.messages) {
@@ -203,7 +215,9 @@ export async function handlePushQueue(batch: MessageBatch<PushJob>, env: Env) {
       continue;
     }
     try {
-      const r = await sendToUsers(env, msg.body.userIds, msg.body.payload);
+      const r = msg.body.roomId
+        ? await notifyUsers(env, msg.body)
+        : await sendToUsers(env, msg.body.userIds, msg.body.payload);
       if (r.failed) console.error(`push: ส่งไม่สำเร็จ ${r.failed} เครื่อง`, r.errors.slice(0, 5));
       msg.ack();
     } catch (err) {
@@ -256,4 +270,68 @@ export async function deliverWebhook(env: Env, botId: string, update: Record<str
     return 'retry';
   }
   return 'ok';
+}
+
+// =====================================================================
+// 7. ตัดสินใจแจ้งเตือนรายคน (ระบบแจ้งเตือนแบบ Telegram)
+//    1) ส่งแบบเงียบ → ไม่เด้ง
+//    2) ปิดเสียงห้อง (ตลอด/มีเวลา) หรือปิดแจ้งเตือนประเภทห้องนั้น → ไม่เด้ง
+//       ยกเว้นถูก @ชื่อ/ถูกตอบกลับ และเปิด "แจ้งเตือนเมื่อถูกพูดถึงแม้ปิดเสียง" ไว้
+//    3) แอปเปิดอยู่บนจอ (UserHub ตอบ visible) → แอปเด้งแบนเนอร์เอง ไม่ส่งแจ้งเตือนมือถือซ้ำ
+//    4) ไม่อย่างนั้น → แจ้งเตือนมือถือ (ซ่อนเนื้อหาถ้าตั้งไว้ + ตัวเลขยังไม่อ่านบนไอคอน)
+// =====================================================================
+type UserNotifyRow = {
+  user_id: string; muted: number; muted_until: string | null;
+  dm: number | null; groups: number | null; channels: number | null; show_preview: number | null; mentions_when_muted: number | null;
+  unread: number;
+};
+
+export async function notifyUsers(env: Env, job: PushJobMessage): Promise<{ sent: number; failed: number; errors: string[] }> {
+  const now = nowThai();
+  const rows: UserNotifyRow[] = [];
+  for (let i = 0; i < job.userIds.length; i += 90) {
+    const part = job.userIds.slice(i, i + 90);
+    const r = await env.DB.prepare(
+      `SELECT m.user_id, m.muted, m.muted_until, s.dm, s.groups, s.channels, s.show_preview, s.mentions_when_muted,
+              (SELECT COALESCE(SUM(r2.last_seq - m2.last_read_seq), 0) FROM room_members m2 JOIN rooms r2 ON r2.id = m2.room_id
+                WHERE m2.user_id = m.user_id AND r2.last_seq > m2.last_read_seq
+                  AND NOT (m2.muted = 1 AND (m2.muted_until IS NULL OR m2.muted_until > ?1))) AS unread
+       FROM room_members m LEFT JOIN notify_settings s ON s.user_id = m.user_id
+       WHERE m.room_id = ?2 AND m.user_id IN (${part.map((_, k) => `?${k + 3}`).join(',')})`,
+    ).bind(now, job.roomId, ...part).all<UserNotifyRow>();
+    rows.push(...r.results);
+  }
+
+  const important = new Set(job.important ?? []);
+  const pushTo: string[] = [];
+  const perUser = new Map<string, PushPayload>();
+  const typeKey = job.roomType === 'dm' ? 'dm' : job.roomType === 'channel' ? 'channels' : 'groups';
+
+  // ส่งถึงแอปที่เปิดอยู่ (UserHub) พร้อมกันครั้งละ 6
+  for (let i = 0; i < rows.length; i += 6) {
+    await Promise.all(rows.slice(i, i + 6).map(async (u) => {
+      const mutedNow = u.muted === 1 && (u.muted_until === null || u.muted_until > now);
+      const typeOn = (u[typeKey] ?? 1) === 1;
+      const override = important.has(u.user_id) && (u.mentions_when_muted ?? 1) === 1;
+      const notify = !job.silent && ((typeOn && !mutedNow) || override);
+      const showPreview = (u.show_preview ?? 1) === 1;
+      const body = showPreview ? job.payload.body : (important.has(u.user_id) ? 'มีคนพูดถึงคุณ' : 'มีข้อความใหม่');
+      const p: PushPayload = { ...job.payload, body, badge: u.unread };
+
+      let visible = false;
+      try {
+        const res = await env.HUB.get(env.HUB.idFromName(u.user_id)).fetch(new Request('https://hub/deliver', {
+          method: 'POST',
+          body: JSON.stringify({ type: 'activity', roomId: job.roomId, notify, title: p.title, body: p.body, unread: u.unread }),
+        }));
+        const j = (await res.json()) as { ok: boolean; data?: { visible: boolean } };
+        visible = !!j.data?.visible;
+      } catch (err) {
+        console.error('ส่ง activity ถึงแอปไม่สำเร็จ — จะส่งแจ้งเตือนมือถือแทน', u.user_id, err);
+      }
+      if (notify && !visible) { pushTo.push(u.user_id); perUser.set(u.user_id, p); }
+    }));
+  }
+  if (pushTo.length === 0) return { sent: 0, failed: 0, errors: [] };
+  return sendToUsers(env, pushTo, (uid) => perUser.get(uid) ?? job.payload);
 }

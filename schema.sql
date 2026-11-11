@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0005_invites.sql
+-- ล่าสุดถึง: 0006_notifications.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -43,7 +43,12 @@ CREATE TABLE rooms (
   last_message_preview  TEXT,
   last_sender_name      TEXT,
   visibility            TEXT CHECK (visibility IN ('public', 'private')),  -- 0003: ชาเนลสาธารณะ/ส่วนตัว (ห้องอื่น NULL)
-  description           TEXT                                               -- 0003: คำอธิบายชาเนล
+  description           TEXT,                                              -- 0003: คำอธิบายชาเนล
+  pinned_seq            INTEGER,  -- 0006: ข้อความที่ปักหมุด (ลำดับในห้อง)
+  pinned_text           TEXT,     -- 0006: ข้อความย่อของโพสต์ที่ปักหมุด
+  pinned_sender         TEXT,     -- 0006
+  pinned_by             TEXT,     -- 0006: ใครปักหมุด (users.id)
+  pinned_at             TEXT      -- 0006
 );
 CREATE INDEX idx_rooms_type_visibility ON rooms(type, visibility);
 
@@ -56,6 +61,7 @@ CREATE TABLE room_members (
   joined_at      TEXT NOT NULL,
   last_read_seq  INTEGER NOT NULL DEFAULT 0,
   muted          INTEGER NOT NULL DEFAULT 0,  -- 0003: 1 = ปิดแจ้งเตือนห้องนี้
+  muted_until    TEXT,                        -- 0006: ปิดถึงเวลานี้ (NULL + muted=1 = ปิดตลอด)
   PRIMARY KEY (room_id, user_id)
 );
 CREATE INDEX idx_room_members_user ON room_members(user_id);
@@ -117,7 +123,8 @@ CREATE TABLE bots (
   last_delivery_at  TEXT,
   last_error        TEXT,
   last_error_at     TEXT,
-  fail_count        INTEGER NOT NULL DEFAULT 0
+  fail_count        INTEGER NOT NULL DEFAULT 0,
+  notify_scope      TEXT NOT NULL DEFAULT 'contacted' CHECK (notify_scope IN ('contacted', 'all'))  -- 0006
 );
 
 -- ---------- ฟอร์ม (สร้างจากหน้า แอดมิน → ฟอร์ม) ----------
@@ -172,4 +179,15 @@ CREATE TABLE invite_uses (
   user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   used_at  TEXT NOT NULL,
   PRIMARY KEY (code, user_id)
+);
+
+-- ---------- ตั้งค่าแจ้งเตือนรวม (0006) ----------
+CREATE TABLE notify_settings (
+  user_id              TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  dm                   INTEGER NOT NULL DEFAULT 1,
+  groups               INTEGER NOT NULL DEFAULT 1,
+  channels             INTEGER NOT NULL DEFAULT 1,
+  show_preview         INTEGER NOT NULL DEFAULT 1,
+  mentions_when_muted  INTEGER NOT NULL DEFAULT 1,
+  updated_at           TEXT NOT NULL
 );

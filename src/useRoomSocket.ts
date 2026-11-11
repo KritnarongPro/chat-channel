@@ -7,6 +7,7 @@
 //   - ข้อความที่ส่ง: กำลังส่ง → ส่งแล้ว · ไม่ได้รับยืนยันใน 10 วินาที หรือเซิร์ฟเวอร์ตอบ error → "ส่งไม่สำเร็จ + เหตุผล" กดส่งใหม่ได้
 //     ส่งใหม่ใช้รหัสเดิม เซิร์ฟเวอร์จึงไม่บันทึกซ้ำ
 //   - ไฟล์ (เฟส 2): กำลังอัป (%) → กำลังส่ง → ส่งแล้ว · อัปไม่สำเร็จ → "ส่งไม่สำเร็จ + เหตุผล" กดส่งใหม่ = อัปใหม่
+//   - แจ้งเตือน: ส่งแบบเงียบ / ตอบกลับ ผ่าน extra · room_update (เช่น ปักหมุด) → เรียก onRoomUpdate
 // =====================================================================
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -48,7 +49,11 @@ function makeClientId() {
   return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 }
 
-export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warning', text: string) => void) {
+export function useRoomSocket(
+  roomId: string,
+  onNotice: (kind: 'error' | 'warning', text: string) => void,
+  onRoomUpdate?: () => void,
+) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [pending, setPending] = useState<PendingMessage[]>([]);
   const [conn, setConn] = useState<ConnState>('connecting');
@@ -64,6 +69,8 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
   const pendingRef = useRef<PendingMessage[]>([]);
   const noticeRef = useRef(onNotice);
   noticeRef.current = onNotice;
+  const roomUpdateRef = useRef(onRoomUpdate);
+  roomUpdateRef.current = onRoomUpdate;
   pendingRef.current = pending;
 
   // ---------- รวมข้อความใหม่เข้ากับของเดิม (กันซ้ำด้วย seq) ----------
@@ -186,6 +193,7 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
             break;
           case 'warning': noticeRef.current('warning', f.message); break;
           case 'pong': break;
+          case 'room_update': roomUpdateRef.current?.(); break;
         }
       };
 
@@ -219,11 +227,11 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
   }, [roomId, merge, markFailed, rawSend, transmit]);
 
   // ---------- ส่งข้อความ ----------
-  const send = useCallback((body: string): string | null => {
+  const send = useCallback((body: string, extra?: MessageExtra): string | null => {
     const text = body.trim();
     if (!text) return 'พิมพ์ข้อความก่อนส่ง';
     if (text.length > MAX_MESSAGE_CHARS) return `ข้อความยาวเกิน ${MAX_MESSAGE_CHARS} ตัวอักษร`;
-    const p: PendingMessage = { clientId: makeClientId(), kind: 'text', body: text, status: 'sending' };
+    const p: PendingMessage = { clientId: makeClientId(), kind: 'text', body: text, status: 'sending', extra };
     setPending((ps) => [...ps, p]);
     transmit(p);
     return null;
@@ -249,14 +257,14 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
     }
   }, [roomId, transmit]);
 
-  const sendFile = useCallback((file: OutgoingFile, caption = ''): string | null => {
+  const sendFile = useCallback((file: OutgoingFile, caption = '', extra?: MessageExtra): string | null => {
     if (file.blob.size === 0) return 'ไฟล์ว่าง ส่งไม่ได้';
     if (file.blob.size > MAX_BYTES[file.kind]) {
       return `ไฟล์ใหญ่เกิน ${formatSize(MAX_BYTES[file.kind])} (ไฟล์นี้ ${formatSize(file.blob.size)})`;
     }
     if (caption.length > MAX_MESSAGE_CHARS) return `คำบรรยายยาวเกิน ${MAX_MESSAGE_CHARS} ตัวอักษร`;
     const p: PendingMessage = {
-      clientId: makeClientId(), kind: file.kind, body: caption.trim(), status: 'uploading', progress: 0, file,
+      clientId: makeClientId(), kind: file.kind, body: caption.trim(), status: 'uploading', progress: 0, file, extra,
       previewUrl: file.kind === 'image' ? URL.createObjectURL(file.blob) : undefined,
     };
     setPending((ps) => [...ps, p]);
@@ -265,9 +273,9 @@ export function useRoomSocket(roomId: string, onNotice: (kind: 'error' | 'warnin
   }, [upload]);
 
   // ---------- การ์ดฟอร์ม (แอดมินระบบเท่านั้น — ห้องตรวจสิทธิ์ซ้ำ) ----------
-  const sendForm = useCallback((formId: string, formTitle: string, caption = '') => {
+  const sendForm = useCallback((formId: string, formTitle: string, caption = '', extra?: MessageExtra) => {
     const p: PendingMessage = {
-      clientId: makeClientId(), kind: 'form', body: caption.trim(), status: 'sending', extra: { formId, formTitle },
+      clientId: makeClientId(), kind: 'form', body: caption.trim(), status: 'sending', extra: { ...extra, formId, formTitle },
     };
     setPending((ps) => [...ps, p]);
     transmit(p);

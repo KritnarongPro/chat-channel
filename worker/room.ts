@@ -219,6 +219,21 @@ export class ChatRoom extends DurableObject<Env> {
       return json({ ok: true, data: { messages, hasMore } });
     }
 
+    // ---------- อ่านข้อความเดียว (ใช้ตอนปักหมุด) ----------
+    if (url.pathname === '/message') {
+      const seq = Number(url.searchParams.get('seq'));
+      const row = Number.isInteger(seq) ? this.sql.exec<MsgRow>(`SELECT * FROM messages WHERE seq = ?`, seq).toArray()[0] : undefined;
+      if (!row) return json({ ok: false, error: { code: 'MESSAGE_NOT_FOUND', message: 'ไม่พบข้อความนี้ในห้อง' } }, 404);
+      const m = msgOut(row);
+      return json({ ok: true, data: { message: m, preview: previewOf(m) } });
+    }
+
+    // ---------- บอกทุกคนที่เปิดห้องอยู่ว่าข้อมูลห้องเปลี่ยน (เช่น ปักหมุด) ----------
+    if (url.pathname === '/broadcast' && req.method === 'POST') {
+      this.broadcast({ type: 'room_update' });
+      return json({ ok: true, data: { sent: this.ctx.getWebSockets().length } });
+    }
+
     // ---------- ส่งข้อความจาก worker (บอทผ่าน Bot API / ระบบแจ้งสถานะออเดอร์) ----------
     // ตรวจสิทธิ์ซ้ำในห้องเหมือนคนส่งผ่าน WebSocket (checkPoster) — ผิดเงื่อนไขตอบ error พร้อมเหตุผล
     if (url.pathname === '/post' && req.method === 'POST') {
@@ -408,6 +423,25 @@ export class ChatRoom extends DurableObject<Env> {
       extraOut = { orderId: (extra as MessageExtra).orderId }; // ข้อความแจ้งสถานะออเดอร์ (ระบบใส่ให้)
     }
 
+    // ---------- แจ้งเตือน: ส่งแบบเงียบ + ตอบกลับ (ห้องเติมข้อมูลข้อความที่ถูกตอบเองจากของจริง ไม่เชื่อหน้าเว็บ) ----------
+    const ex = (extra && typeof extra === 'object' ? extra : {}) as MessageExtra;
+    if (ex.silent === true) extraOut = { ...(extraOut ?? {}), silent: true };
+    if (ex.replyTo && typeof ex.replyTo === 'object') {
+      const seq = Number(ex.replyTo.seq);
+      const target = Number.isInteger(seq)
+        ? this.sql.exec<MsgRow>(`SELECT * FROM messages WHERE seq = ?`, seq).toArray()[0]
+        : undefined;
+      if (!target) {
+        out({ type: 'error', clientId, code: 'REPLY_NOT_FOUND', message: 'ไม่พบข้อความที่จะตอบกลับ (อาจถูกลบหรืออยู่คนละห้อง)' });
+        return null;
+      }
+      const t = msgOut(target);
+      extraOut = {
+        ...(extraOut ?? {}),
+        replyTo: { seq: t.seq, senderId: t.senderId, senderName: t.senderName, snippet: previewOf(t).slice(0, 80) },
+      };
+    }
+
     // ---------- บันทึก ----------
     let row: MsgRow;
     try {
@@ -563,31 +597,36 @@ export class ChatRoom extends DurableObject<Env> {
   // =====================================================================
   // 4. แจ้งเตือนบนมือถือ
   // =====================================================================
+  /** หาผู้รับ + คนที่ถูก @ชื่อ/ถูกตอบกลับ แล้วใส่งานลง Queue — การตัดสินใจรายคน (ปิดเสียง/ตั้งค่า/แอปเปิดอยู่) ทำใน worker/push.ts */
   private async queuePush(out: Reply, m: ChatMessage, room: RoomInfo) {
     const roomId = this.roomId;
     if (!roomId) return;
-    // คนที่เปิดหน้าจอห้องนี้อยู่ ไม่ต้องแจ้งเตือน
+    // คนที่เปิดหน้าจอห้องนี้อยู่ ไม่ต้องแจ้งอะไรเลย (เห็นข้อความอยู่แล้ว)
     const viewing = new Set<string>();
     for (const s of this.ctx.getWebSockets()) {
       const i = s.deserializeAttachment() as SocketInfo | null;
       if (i?.visible) viewing.add(i.userId);
     }
-    let userIds: string[];
+    let members: { user_id: string; display_name: string }[];
     try {
       const rows = await this.env.DB.prepare(
-        `SELECT m.user_id FROM room_members m JOIN users u ON u.id = m.user_id
-         WHERE m.room_id = ? AND m.user_id <> ? AND m.muted = 0 AND u.status = 'active' AND u.is_bot = 0
-           AND EXISTS (SELECT 1 FROM push_subscriptions p WHERE p.user_id = m.user_id)`,
-      ).bind(roomId, m.senderId).all<{ user_id: string }>();
-      userIds = rows.results.map((r) => r.user_id).filter((id) => !viewing.has(id));
+        `SELECT m.user_id, u.display_name FROM room_members m JOIN users u ON u.id = m.user_id
+         WHERE m.room_id = ? AND m.user_id <> ? AND u.status = 'active' AND u.is_bot = 0`,
+      ).bind(roomId, m.senderId).all<{ user_id: string; display_name: string }>();
+      members = rows.results.filter((r) => !viewing.has(r.user_id));
     } catch (err) {
       console.error('หาผู้รับแจ้งเตือนไม่สำเร็จ', err);
       out({ type: 'warning', code: 'PUSH_FAILED', message: 'ส่งข้อความแล้ว แต่ส่งแจ้งเตือนให้คนอื่นไม่สำเร็จ (ฐานข้อมูลขัดข้อง)' });
       return;
     }
-    if (userIds.length === 0) return;
+    if (members.length === 0) return;
 
-    // เนื้อหาแจ้งเตือน (ตามที่เลือก: แสดงชื่อคนส่ง + ข้อความ)
+    // ถูก @ชื่อ (ไม่สนตัวพิมพ์เล็กใหญ่) หรือถูกตอบกลับ → แจ้งเตือนได้แม้ปิดเสียง (ถ้าผู้รับตั้งไว้)
+    const lower = m.body.toLowerCase();
+    const important = members
+      .filter((x) => lower.includes(`@${x.display_name.toLowerCase()}`) || m.extra?.replyTo?.senderId === x.user_id)
+      .map((x) => x.user_id);
+
     const text = m.kind === 'text' ? m.body
       : m.kind === 'image' ? `[รูปภาพ]${m.body ? ' ' + m.body : ''}`
       : m.kind === 'voice' ? '[ข้อความเสียง]'
@@ -596,10 +635,12 @@ export class ChatRoom extends DurableObject<Env> {
     const title = room.type === 'dm' ? m.senderName : (room.title ?? (room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม'));
     const body = (room.type === 'group' ? `${m.senderName}: ${text}` : text).slice(0, 200);
     const payload = { title, body, url: `/room/${roomId}`, tag: `room-${roomId}` };
+    const base = { roomId, roomType: room.type, silent: m.extra?.silent === true, important, payload };
 
     // ชุดละ 100 คน · sendBatch ได้ครั้งละ 100 งาน
+    const ids = members.map((x) => x.user_id);
     const jobs: { body: PushJob }[] = [];
-    for (let i = 0; i < userIds.length; i += 100) jobs.push({ body: { type: 'push', userIds: userIds.slice(i, i + 100), payload } });
+    for (let i = 0; i < ids.length; i += 100) jobs.push({ body: { type: 'push', userIds: ids.slice(i, i + 100), ...base } });
     try {
       for (let i = 0; i < jobs.length; i += 100) await this.env.PUSH_QUEUE.sendBatch(jobs.slice(i, i + 100));
     } catch (err) {

@@ -1,10 +1,11 @@
 // =====================================================================
 // SettingsPage.tsx — ตั้งค่าแจ้งเตือน: สถานะเครื่องนี้, ส่งทดสอบ, รายการเครื่อง + เหตุผลที่ส่งไม่สำเร็จล่าสุด
+// แจ้งเตือน (ข้อ ฉ): เปิด/ปิดตามชนิดห้อง · ซ่อนเนื้อหาข้อความ · @ชื่อ/ตอบกลับ เด้งแม้ปิดเสียง
 // =====================================================================
 
 import { useCallback, useEffect, useState } from 'react';
 import { thaiClock, thaiDate } from '../../shared/time';
-import { api, errMsg } from '../api';
+import { NotifySettings, api, errMsg } from '../api';
 import { TopBar } from '../components';
 import { useNotify } from '../notice';
 import { PushState, currentEndpoint, disablePush, enablePush, getPushState } from '../pwa';
@@ -83,6 +84,8 @@ export default function SettingsPage() {
         <p className="small muted">ปิดเสียงรายห้องได้ที่ปุ่ม 🔔 มุมขวาบนในแต่ละห้อง</p>
       </div>
 
+      <NotifySettingsBlock />
+
       <h3 className="section-title">เครื่องที่รับแจ้งเตือน</h3>
       {devices?.length === 0 && <p className="center muted">ยังไม่มีเครื่องที่เปิดแจ้งเตือน</p>}
       <ul className="user-list">
@@ -106,5 +109,69 @@ export default function SettingsPage() {
         ))}
       </ul>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// ตั้งค่าแจ้งเตือนรวม (ใช้กับทุกเครื่องของบัญชีนี้) — กดสลับแล้วบันทึกทันที บันทึกไม่ผ่าน → คืนค่าเดิม + แจ้ง error
+// ---------------------------------------------------------------------
+const SETTING_ROWS: { key: keyof NotifySettings; label: string; hint: string }[] = [
+  { key: 'dm', label: 'แชท 1:1', hint: 'ข้อความส่วนตัวรวมถึงจากบอท' },
+  { key: 'groups', label: 'กลุ่ม', hint: '' },
+  { key: 'channels', label: 'ชาเนล', hint: '' },
+  { key: 'show_preview', label: 'แสดงเนื้อหาข้อความในแจ้งเตือน', hint: 'ปิด = ขึ้นแค่ "มีข้อความใหม่" (คนข้าง ๆ ไม่เห็นเนื้อหา)' },
+  { key: 'mentions_when_muted', label: '@ชื่อ / ตอบกลับ เด้งแม้ปิดเสียง', hint: 'ห้องที่ปิดเสียงไว้ ถ้ามีคนเรียกชื่อหรือตอบกลับคุณ ยังเด้ง' },
+];
+
+function NotifySettingsBlock() {
+  const notify = useNotify();
+  const [v, setV] = useState<NotifySettings | null>(null);
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    api.get<{ settings: NotifySettings }>('/api/me/notify-settings')
+      .then((d) => setV(d.settings))
+      .catch((e) => setError(`โหลดการตั้งค่าแจ้งเตือนไม่สำเร็จ: ${errMsg(e)}`));
+  }, []);
+
+  async function toggle(k: keyof NotifySettings) {
+    if (!v) return;
+    const before = v;
+    const next = { ...v, [k]: !v[k] };
+    setV(next);
+    setSaving(true);
+    try {
+      await api.post('/api/me/notify-settings', next);
+    } catch (e) {
+      setV(before);
+      notify('error', `บันทึกการตั้งค่าไม่สำเร็จ (คืนค่าเดิมแล้ว): ${errMsg(e)}`);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <h3 className="section-title">แจ้งเตือนอะไรบ้าง (ทุกเครื่องของคุณ)</h3>
+      {error && <div className="banner banner-error" role="alert">{error}</div>}
+      {!v && !error && <p className="center muted">กำลังโหลด…</p>}
+      {v && (
+        <ul className="user-list">
+          {SETTING_ROWS.map((r) => (
+            <li key={r.key}>
+              <label className="user-item">
+                <input type="checkbox" checked={v[r.key]} disabled={saving} onChange={() => void toggle(r.key)} />
+                <div className="grow">
+                  <div>{r.label}</div>
+                  {r.hint && <div className="small muted">{r.hint}</div>}
+                </div>
+              </label>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="small muted">ข้อความที่ผู้ส่งเลือก "ส่งเงียบ" จะไม่เด้งเสมอ แต่ยังนับเป็นข้อความยังไม่อ่าน</p>
+    </>
   );
 }

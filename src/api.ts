@@ -108,7 +108,9 @@ export interface Room {
   createdAt: string;
   unread: number;
   myRole: string;
-  muted: boolean;                              // เฟส 3: ปิดแจ้งเตือนห้องนี้
+  muted: boolean;                              // เฟส 3: ปิดแจ้งเตือนห้องนี้ (คิดจาก mutedUntil แล้ว)
+  mutedUntil: string | null;                   // แจ้งเตือน: ปิดเสียงถึงเวลาไหน (null = ตลอด / ไม่ได้ปิด)
+  pinned: { seq: number; text: string; sender: string | null; at: string } | null;  // ข้อความที่ปักหมุด
   visibility: 'public' | 'private' | null;     // เฟส 3: ชาเนลสาธารณะ/ส่วนตัว
   description: string | null;
   canPost: boolean;                            // ชาเนล: เฉพาะเจ้าของ/แอดมินชาเนล
@@ -118,10 +120,15 @@ export interface RoomMember { id: string; displayName: string; pictureUrl: strin
 
 export type { ChatMessage };
 
+/** ตั้งค่าแจ้งเตือนรวม (ทุกค่าเริ่มต้น = เปิด) */
+export interface NotifySettings { dm: boolean; groups: boolean; channels: boolean; show_preview: boolean; mentions_when_muted: boolean }
+
+
 // ---------- เฟส 4: บอท / ฟอร์ม / ออเดอร์ ----------
 export interface Bot {
   id: string; name: string; tokenHint: string; webhookUrl: string | null; webhookSecret: string; enabled: boolean;
   createdAt: string; lastDeliveryAt: string | null; lastError: string | null; lastErrorAt: string | null; failCount: number;
+  notifyScope: 'contacted' | 'all';   // แจ้งเตือนตรง: เฉพาะคนที่เคยคุยกับบอท / ทุกคนในระบบ
 }
 export interface FormInfo {
   id: string; title: string; description: string | null; fields: import('../shared/forms').FormField[];

@@ -143,10 +143,28 @@ if (!/checkSubmission\(form\.fields, body\.values\)/.test(index)) fail('BUGS-08'
   if (iMember < 0 || iProblem < 0 || iMember > iProblem) fail('BUGS-10', 'redeemInvite ต้องตรวจ "เป็นสมาชิกอยู่แล้ว" ก่อน inviteProblem');
 }
 
+// ---------- BUGS-11 service worker: ได้ push แล้วต้อง showNotification ทันที ห้าม await ก่อน (iPhone ถอนสิทธิ์แจ้งเตือน) ----------
+{
+  const sw = read(join('public', 'sw.js'));
+  const start = sw.indexOf("addEventListener('push'");
+  const end = sw.indexOf('addEventListener(', start + 10);
+  const handler = sw.slice(start, end < 0 ? undefined : end);
+  const iShow = handler.indexOf('showNotification');
+  if (start < 0 || iShow < 0) fail('BUGS-11', 'public/sw.js ต้องมี push handler ที่เรียก showNotification');
+  else if (/\bawait\b|\.then\(/.test(handler.slice(0, iShow))) fail('BUGS-11', 'public/sw.js: ห้ามมี await/.then ก่อน showNotification ใน push handler');
+}
+
+// ---------- BUGS-12 ปิดเสียงแบบมีเวลา: ทุกที่ที่ดู muted ต้องดู muted_until ด้วย (ไม่งั้นปิดเสียง 1 ชม. กลายเป็นปิดตลอด) ----------
+for (const f of [join('worker', 'index.ts'), join('worker', 'push.ts')]) {
+  read(f).split('\n').forEach((line, i) => {
+    if (/muted\s*(===|=)\s*1/.test(line) && !/muted_until/.test(line)) fail('BUGS-12', `${f}:${i + 1} เช็ก muted โดยไม่ดู muted_until`);
+  });
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..05, BUGS-01..10)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..05, BUGS-01..12)');

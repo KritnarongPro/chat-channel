@@ -58,9 +58,20 @@ webhook ต้องตอบ HTTP 2xx ภายใน 15 วินาที ไ
 |---|---|---|---|
 | GET | `/api/bot/me` | – | ชื่อ/รหัสบอท |
 | GET | `/api/bot/rooms` | – | ห้องที่บอทอยู่ (+ ตำแหน่ง) |
-| POST | `/api/bot/sendMessage` | `{ roomId, text }` | ส่งข้อความ |
-| POST | `/api/bot/sendForm` | `{ roomId, formId, text? }` | ส่งการ์ดฟอร์ม |
+| POST | `/api/bot/sendMessage` | `{ roomId, text, silent? }` | ส่งข้อความ (`silent: true` = ส่งแบบเงียบ ไม่เด้ง) |
+| POST | `/api/bot/sendForm` | `{ roomId, formId, text?, silent? }` | ส่งการ์ดฟอร์ม |
+| POST | `/api/bot/notify` | `{ userIds: [..≤100], text, silent? }` | แจ้งเตือนตรงถึงผู้ใช้ (ส่งเข้าแชท 1:1 กับบอท) — ดูด้านล่าง |
 | GET | `/api/bot/orders?status=new` | – | ออเดอร์ของฟอร์มที่ผูกกับบอทนี้ |
 | POST | `/api/bot/orders/:id/status` | `{ status, note? }` | เปลี่ยนสถานะ (new / in_progress / done / cancelled) — ลูกค้าได้ข้อความแจ้งในห้อง |
+
+### แจ้งเตือนตรง `/api/bot/notify`
+
+ขอบเขตตั้งได้ที่ แอดมิน → บอท → "บอทส่งแจ้งเตือนตรงถึง":
+
+- **เฉพาะคนที่เคยคุยกับบอท** (ค่าเริ่มต้น เหมือนเทเลแกรม) — คนที่ยังไม่เคยมีแชท 1:1 กับบอทจะได้ `NOT_CONTACTED`
+- **ทุกคนในระบบ** — บอทเปิดแชท 1:1 ให้เองแล้วส่ง
+
+ตอบกลับแยกรายคน ไม่ล้มทั้งชุด: `{ sent: [{ userId, roomId }], failed: [{ userId, code, reason }] }` — ใน n8n ให้เช็ก `failed` ทุกครั้ง
+(`USER_NOT_ACTIVE` = ไม่พบผู้ใช้/ยังไม่อนุมัติ). ผู้รับที่ปิดเสียงแชทกับบอทไว้จะไม่เด้ง แต่ข้อความยังอยู่ในแชท
 
 error ที่พบบ่อย: `BAD_BOT_TOKEN` (token ผิด/ถูกสร้างใหม่) · `NOT_MEMBER` (บอทไม่ได้อยู่ในห้อง) · `NOT_CHANNEL_ADMIN` (ชาเนล: ต้องตั้งบอทเป็นแอดมินชาเนล) · `FORM_INACTIVE`

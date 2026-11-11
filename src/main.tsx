@@ -23,6 +23,7 @@ import AdminFormsPage from './pages/AdminFormsPage';
 import FormFillPage from './pages/FormFillPage';
 import OrdersPage from './pages/OrdersPage';
 import JoinPage from './pages/JoinPage';
+import InAppNotifier from './InAppNotifier';
 import './styles.css';
 
 function App() {
@@ -85,6 +86,8 @@ function App() {
       {me.user.status !== 'active' ? (
         <PendingPage />
       ) : (
+        <>
+        <InAppNotifier />
         <Routes>
           <Route index element={<ChatListPage />} />
           <Route path="new" element={<NewChatPage />} />
@@ -98,6 +101,7 @@ function App() {
           <Route path="admin" element={me.user.role === 'admin' ? <AdminPage /> : <Navigate to="/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </>
       )}
     </MeContext.Provider>
   );

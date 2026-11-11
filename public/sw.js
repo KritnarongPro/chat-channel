@@ -19,6 +19,10 @@ self.addEventListener('fetch', (event) => {
   );
 });
 
+// ---------- รวมแจ้งเตือนต่อห้อง: นับข้อความที่ยังไม่ได้แตะของแต่ละห้อง (หน่วยความจำของ service worker) ----------
+// ⚠️ iPhone/Safari: ต้องเรียก showNotification ทันทีทุกครั้งที่ได้ push ห้าม await อะไรก่อน ไม่งั้นโดนถอนสิทธิ์ (BUGS-11)
+const pendingCount = new Map();
+
 self.addEventListener('push', (event) => {
   let data = { title: 'แชทส่วนตัว', body: 'มีข้อความใหม่', url: '/', tag: 'chat' };
   try {
@@ -26,20 +30,38 @@ self.addEventListener('push', (event) => {
   } catch (err) {
     console.error('อ่านข้อมูลแจ้งเตือนไม่ได้', err);
   }
-  event.waitUntil(
-    self.registration.showNotification(data.title, {
-      body: data.body,
-      tag: data.tag,
-      renotify: true,
-      icon: '/icons/icon-192.png',
-      badge: '/icons/icon-192.png',
-      data: { url: data.url },
-    }),
-  );
+  const n = (pendingCount.get(data.tag) || 0) + 1;
+  pendingCount.set(data.tag, n);
+  const body = n > 1 ? `${n} ข้อความใหม่ · ล่าสุด: ${data.body}` : data.body;
+  const show = self.registration.showNotification(data.title, {
+    body,
+    tag: data.tag,
+    renotify: true,
+    icon: '/icons/icon-192.png',
+    badge: '/icons/icon-192.png',
+    data: { url: data.url, tag: data.tag },
+  });
+  // ตัวเลขยังไม่อ่านบนไอคอนแอป (รองรับเฉพาะบางเครื่อง — ไม่รองรับก็ข้าม)
+  const badge = typeof data.badge === 'number' && self.navigator.setAppBadge
+    ? self.navigator.setAppBadge(data.badge).catch((err) => console.error('ตั้งตัวเลขบนไอคอนไม่ได้', err))
+    : Promise.resolve();
+  event.waitUntil(Promise.all([show, badge]));
+});
+
+// หน้าเว็บเปิดห้องแล้ว → ล้างตัวนับ + ปิดแจ้งเตือนของห้องนั้น
+self.addEventListener('message', (event) => {
+  const msg = event.data || {};
+  if (msg.type === 'room-opened' && typeof msg.tag === 'string') {
+    pendingCount.delete(msg.tag);
+    event.waitUntil(
+      self.registration.getNotifications({ tag: msg.tag }).then((list) => list.forEach((x) => x.close())),
+    );
+  }
 });
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
+  if (event.notification.data && event.notification.data.tag) pendingCount.delete(event.notification.data.tag);
   const url = new URL((event.notification.data && event.notification.data.url) || '/', self.location.origin).href;
   event.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });

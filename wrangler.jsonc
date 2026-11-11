@@ -50,12 +50,20 @@
   // ---------- Queue: กระจายแจ้งเตือนบนมือถือ (ต้องสร้าง queue ชื่อ chat-push ใน Cloudflare ก่อน deploy) ----------
   "queues": {
     "producers": [{ "binding": "PUSH_QUEUE", "queue": "chat-push" }],
-    "consumers": [{ "queue": "chat-push", "max_batch_size": 10, "max_batch_timeout": 1, "max_retries": 3 }]
+    // max_batch_size 3: งานแจ้งเตือน 1 งาน = ผู้รับไม่เกิน 100 คน × (ส่งถึงแอป + ส่งมือถือ) → คุมจำนวนคำขอต่อรอบ
+    "consumers": [{ "queue": "chat-push", "max_batch_size": 3, "max_batch_timeout": 1, "max_retries": 3 }]
   },
 
   // ---------- Durable Object: 1 ห้อง = 1 ตัว (WebSocket + ข้อความเก็บใน SQLite ของห้อง) ----------
   "durable_objects": {
-    "bindings": [{ "name": "ROOM", "class_name": "ChatRoom" }]
+    "bindings": [
+      { "name": "ROOM", "class_name": "ChatRoom" },
+      // UserHub: 1 ผู้ใช้ = 1 ตัว ถือการเชื่อมต่อของแอปที่เปิดอยู่ (แจ้งเตือนในแอป / ตัวเลขยังไม่อ่าน)
+      { "name": "HUB", "class_name": "UserHub" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ChatRoom"] }]
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ChatRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["UserHub"] }
+  ]
 }

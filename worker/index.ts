@@ -7,6 +7,7 @@
 //   2. Handlers: health / auth / setup / admin / users / rooms / channels / messages / files / push
 //                bots (แอดมินจัดการ) / bot-api (บอทเรียกด้วย token) / forms / orders   ← เฟส 4
 //                invites (ลิงก์เชิญเข้าชาเนล/กลุ่ม)
+//                notify (ระบบแจ้งเตือนแบบ Telegram: ปิดเสียงมีเวลา, ตั้งค่ารวม, ปักหมุด, แอปเปิดอยู่, บอทแจ้งเตือน)
 //   3. ตัวช่วยเรื่องห้อง (ตรวจสมาชิก, สิทธิ์โพสต์)
 //   4. Entry point (fetch + scheduled: ลบไฟล์ครบ 180 วัน + queue: ส่งแจ้งเตือน)
 //
@@ -30,6 +31,7 @@ import { lineCallback, lineConfigError, lineStart } from './auth-line';
 import { InviteRow, inviteProblem, loadInvite, redeemInvite } from './invites';
 
 export { ChatRoom } from './room';
+export { UserHub } from './hub';
 
 // =====================================================================
 // 1. Router
@@ -71,6 +73,12 @@ const routes: Route[] = [
   { method: 'GET',  pattern: '/api/rooms/:id',                need: 'active', handler: getRoom },
   { method: 'POST', pattern: '/api/rooms/:id/members',        need: 'active', handler: addMembers },
   { method: 'POST', pattern: '/api/rooms/:id/mute',           need: 'active', handler: setMute },
+  { method: 'POST', pattern: '/api/rooms/:id/pin',            need: 'active', handler: pinMessage },
+
+  // ---------- notify: ตั้งค่าแจ้งเตือนรวม + การเชื่อมต่อของแอป (แจ้งเตือนในแอป) ----------
+  { method: 'GET',  pattern: '/api/me/notify-settings',       need: 'active', handler: getNotifySettings },
+  { method: 'POST', pattern: '/api/me/notify-settings',       need: 'active', handler: saveNotifySettings },
+  { method: 'GET',  pattern: '/api/me/ws',                    need: 'active', handler: openHub },
 
   // ---------- channels (สร้างได้เฉพาะแอดมินระบบ · โพสต์ได้เฉพาะเจ้าของ/แอดมินชาเนล) ----------
   { method: 'GET',  pattern: '/api/channels',                 need: 'active', handler: listChannels },
@@ -106,6 +114,7 @@ const routes: Route[] = [
   { method: 'GET',  pattern: '/api/bot/rooms',                need: 'bot',    handler: botRooms },
   { method: 'POST', pattern: '/api/bot/sendMessage',          need: 'bot',    handler: botSendMessage },
   { method: 'POST', pattern: '/api/bot/sendForm',             need: 'bot',    handler: botSendForm },
+  { method: 'POST', pattern: '/api/bot/notify',               need: 'bot',    handler: botNotify },
   { method: 'GET',  pattern: '/api/bot/orders',               need: 'bot',    handler: botOrders },
   { method: 'POST', pattern: '/api/bot/orders/:orderId/status', need: 'bot',  handler: botSetOrderStatus },
 
@@ -286,14 +295,16 @@ type RoomListRow = {
   id: string; type: 'dm' | 'group' | 'channel'; title: string | null; last_seq: number;
   last_message_at: string | null; last_message_preview: string | null; last_sender_name: string | null;
   created_at: string; last_read_seq: number; my_role: string; peer_name: string | null; peer_picture: string | null;
-  visibility: 'public' | 'private' | null; description: string | null; muted: number;
+  visibility: 'public' | 'private' | null; description: string | null; muted: number; muted_until: string | null;
+  pinned_seq: number | null; pinned_text: string | null; pinned_sender: string | null; pinned_at: string | null;
 };
 
 async function listRooms(c: Ctx) {
   const rows = await db('อ่านรายการแชท', () =>
     c.env.DB.prepare(
       `SELECT r.id, r.type, r.title, r.last_seq, r.last_message_at, r.last_message_preview, r.last_sender_name,
-              r.created_at, r.visibility, r.description, m.last_read_seq, m.role AS my_role, m.muted,
+              r.created_at, r.visibility, r.description, m.last_read_seq, m.role AS my_role, m.muted, m.muted_until,
+              r.pinned_seq, r.pinned_text, r.pinned_sender, r.pinned_at,
               (SELECT u.display_name FROM room_members m2 JOIN users u ON u.id = m2.user_id
                  WHERE m2.room_id = r.id AND m2.user_id <> ?1 LIMIT 1) AS peer_name,
               (SELECT u.picture_url FROM room_members m2 JOIN users u ON u.id = m2.user_id
@@ -319,7 +330,10 @@ function roomOut(r: RoomListRow) {
     createdAt: r.created_at,
     unread: Math.max(0, r.last_seq - r.last_read_seq),
     myRole: r.my_role,
-    muted: r.muted === 1,
+    // ปิดเสียงอยู่ไหม: ปิดตลอด หรือยังไม่ถึงเวลาเปิดเสียงเอง
+    muted: r.muted === 1 && (r.muted_until === null || r.muted_until > nowThai()),
+    mutedUntil: r.muted === 1 ? r.muted_until : null,
+    pinned: r.pinned_seq ? { seq: r.pinned_seq, text: r.pinned_text, sender: r.pinned_sender, at: r.pinned_at } : null,
     visibility: r.visibility,
     description: r.description,
     canPost: r.type !== 'channel' || r.my_role === 'owner' || r.my_role === 'admin',
@@ -441,15 +455,94 @@ async function addMembers(c: Ctx) {
   return ok({ added: ids.length });
 }
 
+const MUTE_FOR: Record<string, number | null> = { '1h': 3600_000, '8h': 8 * 3600_000, '2d': 2 * 86400_000, forever: null };
+
+/** ปิดเสียงห้อง: { muted: true, for: '1h' | '8h' | '2d' | 'forever' } · เปิดเสียง: { muted: false } */
 async function setMute(c: Ctx) {
   await requireMember(c.env, c.params.id, c.user!.id);
-  const body = await readJson<{ muted?: unknown }>(c.req);
+  const body = await readJson<{ muted?: unknown; for?: unknown }>(c.req);
   if (typeof body.muted !== 'boolean') throw new ApiError(400, 'BAD_MUTED', 'ค่าปิดเสียงต้องเป็น true หรือ false');
+  const dur = typeof body.for === 'string' ? body.for : 'forever';
+  if (body.muted && !(dur in MUTE_FOR)) throw new ApiError(400, 'BAD_DURATION', 'ระยะเวลาปิดเสียงต้องเป็น 1h, 8h, 2d หรือ forever');
+  const ms = MUTE_FOR[dur];
+  const until = body.muted && ms ? thaiAfter(ms) : null;
   await db('บันทึกการปิดเสียง', () =>
-    c.env.DB.prepare(`UPDATE room_members SET muted = ? WHERE room_id = ? AND user_id = ?`)
-      .bind(body.muted ? 1 : 0, c.params.id, c.user!.id).run(),
+    c.env.DB.prepare(`UPDATE room_members SET muted = ?, muted_until = ? WHERE room_id = ? AND user_id = ?`)
+      .bind(body.muted ? 1 : 0, until, c.params.id, c.user!.id).run(),
   );
-  return ok({ muted: body.muted });
+  return ok({ muted: body.muted, mutedUntil: until });
+}
+
+// ---------- notify: ตั้งค่าแจ้งเตือนรวม ----------
+const NOTIFY_KEYS = ['dm', 'groups', 'channels', 'show_preview', 'mentions_when_muted'] as const;
+type NotifySettings = Record<(typeof NOTIFY_KEYS)[number], boolean>;
+
+async function getNotifySettings(c: Ctx) {
+  const r = await db('อ่านตั้งค่าแจ้งเตือน', () =>
+    c.env.DB.prepare(`SELECT * FROM notify_settings WHERE user_id = ?`).bind(c.user!.id).first<Record<string, number>>(),
+  );
+  const out = Object.fromEntries(NOTIFY_KEYS.map((k) => [k, r ? r[k] === 1 : true])) as NotifySettings;
+  return ok({ settings: out });
+}
+
+async function saveNotifySettings(c: Ctx) {
+  const body = await readJson<Partial<Record<string, unknown>>>(c.req);
+  for (const k of NOTIFY_KEYS) {
+    if (typeof body[k] !== 'boolean') throw new ApiError(400, 'BAD_SETTINGS', `ค่า ${k} ต้องเป็น true หรือ false`);
+  }
+  const v = NOTIFY_KEYS.map((k) => (body[k] ? 1 : 0));
+  await db('บันทึกตั้งค่าแจ้งเตือน', () =>
+    c.env.DB.prepare(
+      `INSERT INTO notify_settings (user_id, dm, groups, channels, show_preview, mentions_when_muted, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET dm = excluded.dm, groups = excluded.groups, channels = excluded.channels,
+         show_preview = excluded.show_preview, mentions_when_muted = excluded.mentions_when_muted, updated_at = excluded.updated_at`,
+    ).bind(c.user!.id, ...v, nowThai()).run(),
+  );
+  return ok({ saved: true });
+}
+
+/** แอปเปิดอยู่ → ต่อ WebSocket กับ UserHub ของตัวเอง (แจ้งเตือนในแอป + ตัวเลขยังไม่อ่าน) */
+async function openHub(c: Ctx) {
+  if (c.req.headers.get('Upgrade') !== 'websocket') throw new ApiError(426, 'NOT_WEBSOCKET', 'ต้องเชื่อมต่อแบบ WebSocket');
+  return c.env.HUB.get(c.env.HUB.idFromName(c.user!.id)).fetch(new Request('https://hub/ws', { headers: { Upgrade: 'websocket' } }));
+}
+
+/** ปักหมุด: { seq, notify } · เลิกปักหมุด: { seq: null } — กลุ่ม/ชาเนล เฉพาะเจ้าของ/แอดมินห้อง · แชท 1:1 ทั้งสองคน */
+async function pinMessage(c: Ctx) {
+  const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
+  if (room.type !== 'dm' && role !== 'owner' && role !== 'admin') {
+    throw new ApiError(403, 'NOT_ROOM_ADMIN', 'เฉพาะเจ้าของ/แอดมินของห้องเท่านั้นที่ปักหมุดได้');
+  }
+  const body = await readJson<{ seq?: unknown; notify?: unknown }>(c.req);
+  const stub = roomStub(c.env, c.params.id);
+  const now = nowThai();
+  if (body.seq === null) {
+    await db('เลิกปักหมุด', () =>
+      c.env.DB.prepare(`UPDATE rooms SET pinned_seq = NULL, pinned_text = NULL, pinned_sender = NULL, pinned_by = NULL, pinned_at = NULL WHERE id = ?`)
+        .bind(c.params.id).run(),
+    );
+  } else {
+    if (typeof body.seq !== 'number' || !Number.isInteger(body.seq)) throw new ApiError(400, 'BAD_SEQ', 'ระบุข้อความที่จะปักหมุดไม่ถูกต้อง');
+    const res = await stub.fetch(new Request(`https://room/message?seq=${body.seq}`, { headers: { 'X-Room-Id': c.params.id } }));
+    const j = (await res.json()) as { ok: boolean; data?: { message: { senderName: string }; preview: string }; error?: { code: string; message: string } };
+    if (!j.ok || !j.data) throw new ApiError(404, j.error?.code ?? 'MESSAGE_NOT_FOUND', j.error?.message ?? 'ไม่พบข้อความนี้');
+    await db('ปักหมุดข้อความ', () =>
+      c.env.DB.prepare(`UPDATE rooms SET pinned_seq = ?, pinned_text = ?, pinned_sender = ?, pinned_by = ?, pinned_at = ? WHERE id = ?`)
+        .bind(body.seq, j.data!.preview.slice(0, 300), j.data!.message.senderName, c.user!.id, now, c.params.id).run(),
+    );
+    // เลือกแจ้งทุกคน → โพสต์ข้อความ "ปักหมุด" (คนในห้องได้แจ้งเตือนตามปกติ)
+    if (body.notify === true) {
+      await postToRoom(c.env, c.params.id, c.user!, { kind: 'text', body: `📌 ปักหมุด: ${j.data.preview.slice(0, 200)}` });
+    }
+  }
+  // บอกคนที่เปิดห้องอยู่ให้โหลดแถบปักหมุดใหม่ (ไม่สำเร็จไม่เป็นไร — เปิดห้องใหม่ก็เห็น)
+  try {
+    await stub.fetch(new Request('https://room/broadcast', { method: 'POST', headers: { 'X-Room-Id': c.params.id } }));
+  } catch (err) {
+    console.error('แจ้งอัปเดตปักหมุดให้คนในห้องไม่สำเร็จ', err);
+  }
+  return ok({ pinned: body.seq ?? null });
 }
 
 // ---------- channels ----------
@@ -785,9 +878,10 @@ async function pushTest(c: Ctx) {
 type BotRow = {
   id: string; display_name: string; picture_url: string | null; token_hint: string; webhook_url: string | null;
   webhook_secret: string; enabled: number; created_at: string; last_delivery_at: string | null;
-  last_error: string | null; last_error_at: string | null; fail_count: number;
+  last_error: string | null; last_error_at: string | null; fail_count: number; notify_scope: 'contacted' | 'all';
 };
 const botOut = (b: BotRow) => ({
+  notifyScope: b.notify_scope,
   id: b.id, name: b.display_name, tokenHint: b.token_hint, webhookUrl: b.webhook_url, webhookSecret: b.webhook_secret,
   enabled: b.enabled === 1, createdAt: b.created_at, lastDeliveryAt: b.last_delivery_at, lastError: b.last_error,
   lastErrorAt: b.last_error_at, failCount: b.fail_count,
@@ -848,8 +942,14 @@ async function adminCreateBot(c: Ctx) {
 }
 
 async function adminUpdateBot(c: Ctx) {
-  const body = await readJson<{ name?: unknown; webhookUrl?: unknown; enabled?: unknown }>(c.req);
+  const body = await readJson<{ name?: unknown; webhookUrl?: unknown; enabled?: unknown; notifyScope?: unknown }>(c.req);
   const stmts: D1PreparedStatement[] = [];
+  if (body.notifyScope !== undefined) {
+    if (body.notifyScope !== 'contacted' && body.notifyScope !== 'all') {
+      throw new ApiError(400, 'BAD_SCOPE', 'ขอบเขตแจ้งเตือนต้องเป็น contacted หรือ all');
+    }
+    stmts.push(c.env.DB.prepare(`UPDATE bots SET notify_scope = ? WHERE id = ?`).bind(body.notifyScope, c.params.id));
+  }
   if (body.name !== undefined) {
     stmts.push(c.env.DB.prepare(`UPDATE users SET display_name = ?, updated_at = ? WHERE id = ? AND is_bot = 1`)
       .bind(checkBotName(body.name), nowThai(), c.params.id));
@@ -918,21 +1018,73 @@ async function postToRoom(env: Env, roomId: string, sender: User, p: { kind: str
 }
 
 async function botSendMessage(c: Ctx) {
-  const body = await readJson<{ roomId?: unknown; text?: unknown }>(c.req);
+  const body = await readJson<{ roomId?: unknown; text?: unknown; silent?: unknown }>(c.req);
   if (typeof body.roomId !== 'string') throw new ApiError(400, 'NO_ROOM', 'ต้องระบุ roomId');
   if (typeof body.text !== 'string' || !body.text.trim()) throw new ApiError(400, 'EMPTY', 'ต้องระบุ text');
   await requireMember(c.env, body.roomId, c.user!.id);
-  return ok(await postToRoom(c.env, body.roomId, c.user!, { kind: 'text', body: body.text }));
+  return ok(await postToRoom(c.env, body.roomId, c.user!, { kind: 'text', body: body.text, extra: body.silent === true ? { silent: true } : undefined }));
 }
 
 async function botSendForm(c: Ctx) {
-  const body = await readJson<{ roomId?: unknown; formId?: unknown; text?: unknown }>(c.req);
+  const body = await readJson<{ roomId?: unknown; formId?: unknown; text?: unknown; silent?: unknown }>(c.req);
   if (typeof body.roomId !== 'string') throw new ApiError(400, 'NO_ROOM', 'ต้องระบุ roomId');
   if (typeof body.formId !== 'string') throw new ApiError(400, 'NO_FORM', 'ต้องระบุ formId');
   await requireMember(c.env, body.roomId, c.user!.id);
   return ok(await postToRoom(c.env, body.roomId, c.user!, {
-    kind: 'form', body: typeof body.text === 'string' ? body.text : '', extra: { formId: body.formId },
+    kind: 'form', body: typeof body.text === 'string' ? body.text : '',
+    extra: { formId: body.formId, ...(body.silent === true ? { silent: true } : {}) },
   }));
+}
+
+/**
+ * บอทส่งแจ้งเตือนหาผู้ใช้โดยตรง: { userIds: [...], text, silent? } (ไม่เกิน 100 คนต่อครั้ง)
+ * ส่งเป็นข้อความในแชท 1:1 กับบอท → ผู้รับได้แจ้งเตือนตามกติกาปกติ
+ * notify_scope = contacted → ส่งได้เฉพาะคนที่มีแชท 1:1 กับบอทอยู่แล้ว · all → สร้างแชท 1:1 ให้ถ้ายังไม่มี
+ * คืนผลรายคน: sent / failed + เหตุผล
+ */
+async function botNotify(c: Ctx) {
+  const body = await readJson<{ userIds?: unknown; text?: unknown; silent?: unknown }>(c.req);
+  if (!Array.isArray(body.userIds) || body.userIds.length === 0 || body.userIds.some((x) => typeof x !== 'string')) {
+    throw new ApiError(400, 'NO_USERS', 'ต้องระบุ userIds เป็นรายการรหัสผู้ใช้');
+  }
+  const userIds = [...new Set(body.userIds as string[])];
+  if (userIds.length > 100) throw new ApiError(400, 'TOO_MANY', 'ส่งได้ไม่เกิน 100 คนต่อครั้ง');
+  if (typeof body.text !== 'string' || !body.text.trim()) throw new ApiError(400, 'EMPTY', 'ต้องระบุ text');
+  const bot = c.user!;
+  const cfg = await db('อ่านขอบเขตบอท', () =>
+    c.env.DB.prepare(`SELECT notify_scope FROM bots WHERE id = ?`).bind(bot.id).first<{ notify_scope: 'contacted' | 'all' }>(),
+  );
+  const active = await activeUserIds(c.env, userIds);
+  const sent: { userId: string; roomId: string }[] = [];
+  const failed: { userId: string; code: string; reason: string }[] = [];
+  for (const uid of userIds) {
+    if (!active.has(uid)) { failed.push({ userId: uid, code: 'USER_NOT_ACTIVE', reason: 'ไม่พบผู้ใช้ หรือยังไม่ได้รับอนุมัติ' }); continue; }
+    const dmKey = [bot.id, uid].sort().join(':');
+    let room = await db('หาแชทกับบอท', () => c.env.DB.prepare(`SELECT id FROM rooms WHERE dm_key = ?`).bind(dmKey).first<{ id: string }>());
+    if (!room) {
+      if (cfg?.notify_scope !== 'all') {
+        failed.push({ userId: uid, code: 'NOT_CONTACTED', reason: 'ผู้ใช้ยังไม่เคยแชทกับบอทนี้ (บอทตั้งให้ส่งได้เฉพาะคนที่เคยคุยแล้ว)' });
+        continue;
+      }
+      const id = newId();
+      const now = nowThai();
+      await db('สร้างแชทกับบอท', () =>
+        c.env.DB.batch([
+          c.env.DB.prepare(`INSERT INTO rooms (id, type, title, dm_key, created_by, created_at) VALUES (?, 'dm', NULL, ?, ?, ?)`).bind(id, dmKey, bot.id, now),
+          c.env.DB.prepare(`INSERT INTO room_members (room_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)`).bind(id, bot.id, now),
+          c.env.DB.prepare(`INSERT INTO room_members (room_id, user_id, role, joined_at) VALUES (?, ?, 'member', ?)`).bind(id, uid, now),
+        ]),
+      );
+      room = { id };
+    }
+    try {
+      await postToRoom(c.env, room.id, bot, { kind: 'text', body: body.text, extra: body.silent === true ? { silent: true } : undefined });
+      sent.push({ userId: uid, roomId: room.id });
+    } catch (err) {
+      failed.push({ userId: uid, code: err instanceof ApiError ? err.code : 'SEND_FAILED', reason: err instanceof Error ? err.message : 'ส่งไม่สำเร็จ' });
+    }
+  }
+  return ok({ sent, failed });
 }
 
 async function botOrders(c: Ctx) {
@@ -1239,7 +1391,8 @@ async function requireMember(env: Env, roomId: string, userId: string) {
   const row = await db('ตรวจสิทธิ์ในห้อง', () =>
     env.DB.prepare(
       `SELECT r.id, r.type, r.title, r.last_seq, r.last_message_at, r.last_message_preview, r.last_sender_name,
-              r.created_at, r.visibility, r.description, m.last_read_seq, m.role AS my_role, m.muted,
+              r.created_at, r.visibility, r.description, m.last_read_seq, m.role AS my_role, m.muted, m.muted_until,
+              r.pinned_seq, r.pinned_text, r.pinned_sender, r.pinned_at,
               (SELECT u.display_name FROM room_members m2 JOIN users u ON u.id = m2.user_id
                  WHERE m2.room_id = r.id AND m2.user_id <> ?2 LIMIT 1) AS peer_name,
               (SELECT u.picture_url FROM room_members m2 JOIN users u ON u.id = m2.user_id
