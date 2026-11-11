@@ -1,6 +1,6 @@
 // =====================================================================
 // ChatListPage.tsx — รายการแชท (เรียงตามข้อความล่าสุด + ตัวเลขยังไม่อ่าน)
-// อัปเดตทุก 15 วินาที และทุกครั้งที่กลับมาที่แอป
+// อัปเดตทุก 15 วินาที, ทุกครั้งที่กลับมาที่แอป และทันทีที่มีข้อความใหม่ (event 'chat-activity' จาก InAppNotifier)
 // =====================================================================
 
 import { useCallback, useEffect, useState } from 'react';
@@ -10,6 +10,7 @@ import { Room, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import SetupCard from '../SetupCard';
+import { setBadge } from '../InAppNotifier';
 
 const REFRESH_MS = 15_000;
 
@@ -23,6 +24,8 @@ export default function ChatListPage() {
       const data = await api.get<{ rooms: Room[] }>('/api/rooms');
       setRooms(data.rooms);
       setError('');
+      // ตัวเลขบนไอคอนแอป = ยังไม่อ่านรวม ไม่นับห้องที่ปิดเสียง (ให้ตรงกับฝั่งเซิร์ฟเวอร์)
+      setBadge(data.rooms.reduce((n, r) => n + (r.muted ? 0 : r.unread), 0));
     } catch (e) {
       setError(`โหลดรายการแชทไม่สำเร็จ: ${errMsg(e)}`);
     }
@@ -33,7 +36,13 @@ export default function ChatListPage() {
     const t = setInterval(() => { if (document.visibilityState === 'visible') void load(); }, REFRESH_MS);
     const onVis = () => { if (document.visibilityState === 'visible') void load(); };
     document.addEventListener('visibilitychange', onVis);
-    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVis); };
+    const onActivity = () => void load();
+    window.addEventListener('chat-activity', onActivity);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('chat-activity', onActivity);
+    };
   }, [load]);
 
   return (
@@ -74,7 +83,7 @@ export default function ChatListPage() {
                       ? `${r.type === 'group' && r.lastSenderName ? r.lastSenderName + ': ' : ''}${r.lastMessagePreview}`
                       : 'ยังไม่มีข้อความ'}
                   </span>
-                  {r.unread > 0 && <span className="badge">{r.unread > 99 ? '99+' : r.unread}</span>}
+                  {r.unread > 0 && <span className={`badge ${r.muted ? 'badge-muted' : ''}`}>{r.unread > 99 ? '99+' : r.unread}</span>}
                 </div>
               </div>
             </Link>

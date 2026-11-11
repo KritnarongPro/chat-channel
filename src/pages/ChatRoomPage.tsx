@@ -3,13 +3,15 @@
 // กลุ่ม: แตะหัวห้องเพื่อดู/เพิ่มสมาชิก
 // เฟส 2: ส่งรูป (ย่อก่อนส่ง) / ส่งเป็นไฟล์ (ชัดเต็ม) / ไฟล์ / ข้อความเสียง
 // เฟส 3: ชาเนล (โพสต์ได้เฉพาะเจ้าของ/แอดมินชาเนล) · ปุ่ม 🔔/🔕 ปิดแจ้งเตือนรายห้อง
+// แจ้งเตือน: ปิดเสียงตามเวลา · ปักหมุด · ตอบกลับ · @ชื่อ · ส่งแบบเงียบ
 // =====================================================================
 
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { thaiClock, thaiDate } from '../../shared/time';
 import { MAX_MESSAGE_CHARS } from '../../shared/protocol';
-import { FormInfo, Room, RoomMember, User, api, errMsg } from '../api';
+import { ChatMessage, FormInfo, Room, RoomMember, User, api, errMsg } from '../api';
+import type { MessageExtra, ReplyRef } from '../../shared/protocol';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
@@ -37,7 +39,11 @@ export default function ChatRoomPage() {
   const stickBottom = useRef(true);
 
   const onNotice = useCallback((kind: 'error' | 'warning', t: string) => notify(kind, t), [notify]);
-  const s = useRoomSocket(id, onNotice);
+  // ---------- แจ้งเตือน: สถานะของช่องพิมพ์ ----------
+  const [replyTo, setReplyTo] = useState<ReplyRef | null>(null);
+  const [silent, setSilent] = useState(false);
+  const [menuFor, setMenuFor] = useState<ChatMessage | null>(null);
+  const [showMute, setShowMute] = useState(false);
 
   const loadRoom = useCallback(async () => {
     try {
@@ -49,6 +55,14 @@ export default function ChatRoomPage() {
     }
   }, [id]);
   useEffect(() => { void loadRoom(); }, [loadRoom]);
+  const s = useRoomSocket(id, onNotice, () => void loadRoom());
+
+  // เปิดห้องนี้ → ล้างแจ้งเตือนของห้องนี้ที่ค้างในถาดแจ้งเตือน (service worker)
+  useEffect(() => {
+    void navigator.serviceWorker?.ready
+      .then((r) => r.active?.postMessage({ type: 'room-opened', tag: `room-${id}` }))
+      .catch(() => undefined);
+  }, [id]);
 
   // ---------- เลื่อนลงล่างสุดเมื่อมีข้อความใหม่ (ถ้าผู้ใช้อยู่ล่างสุดอยู่แล้ว) ----------
   useLayoutEffect(() => {
@@ -74,19 +88,27 @@ export default function ChatRoomPage() {
     }
   }
 
+  /** silent / replyTo ที่ผู้ใช้เลือกไว้ → แนบไปกับข้อความที่ส่ง แล้วล้างการตอบกลับ */
+  function outExtra(): MessageExtra | undefined {
+    if (!silent && !replyTo) return undefined;
+    return { ...(silent ? { silent: true } : {}), ...(replyTo ? { replyTo: { seq: replyTo.seq } } : {}) };
+  }
+
   function submit(e?: FormEvent) {
     e?.preventDefault();
-    const err = s.send(text);
+    const err = s.send(text, outExtra());
     if (err) { setInputError(err); return; }
     setText('');
     setInputError('');
+    setReplyTo(null);
     stickBottom.current = true;
   }
 
   function queueFile(f: OutgoingFile) {
-    const err = s.sendFile(f, text);
+    const err = s.sendFile(f, text, outExtra());
     if (err) { notify('error', `${f.name}: ${err}`); return; }
     setText(''); // ข้อความในช่องพิมพ์กลายเป็นคำบรรยายใต้ไฟล์
+    setReplyTo(null);
     stickBottom.current = true;
   }
 
@@ -127,10 +149,20 @@ export default function ChatRoomPage() {
     }
   }
   function pickForm(f: FormInfo) {
-    s.sendForm(f.id, f.title, text);
+    s.sendForm(f.id, f.title, text, outExtra());
     setText('');
+    setReplyTo(null);
     setFormPicker(null);
     stickBottom.current = true;
+  }
+
+  // ---------- @ชื่อ: พิมพ์ @ แล้วเลือกคนในห้อง ----------
+  const mentionQuery = /(?:^|\s)@([^\s@]*)$/.exec(text)?.[1];
+  const mentionList = mentionQuery === undefined
+    ? []
+    : members.filter((m) => m.id !== me.user.id && m.displayName.toLowerCase().includes(mentionQuery.toLowerCase())).slice(0, 6);
+  function pickMention(m: RoomMember) {
+    setText((t) => t.replace(/@([^\s@]*)$/, `@${m.displayName} `));
   }
 
   function onKey(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -151,15 +183,24 @@ export default function ChatRoomPage() {
   const isChannel = room?.type === 'channel';
   const hasMembers = isGroup || isChannel;
 
-  async function toggleMute() {
+  // ---------- ปักหมุด: แชท 1:1 ทั้งสองคน · กลุ่ม/ชาเนล เฉพาะเจ้าของ/แอดมินห้อง ----------
+  const canPin = !!room && (room.type === 'dm' || room.myRole === 'owner' || room.myRole === 'admin');
+  async function pin(seq: number | null, notifyAll = false) {
     if (!room) return;
     try {
-      await api.post(`/api/rooms/${encodeURIComponent(room.id)}/mute`, { muted: !room.muted });
-      setRoom({ ...room, muted: !room.muted });
-      notify('success', room.muted ? 'เปิดแจ้งเตือนห้องนี้แล้ว' : 'ปิดแจ้งเตือนห้องนี้แล้ว');
+      await api.post(`/api/rooms/${encodeURIComponent(room.id)}/pin`, { seq, notify: notifyAll });
+      notify('success', seq === null ? 'เลิกปักหมุดแล้ว' : notifyAll ? 'ปักหมุดและแจ้งทุกคนแล้ว' : 'ปักหมุดแล้ว');
+      void loadRoom();
     } catch (e) {
-      notify('error', `ตั้งค่าแจ้งเตือนไม่สำเร็จ: ${errMsg(e)}`);
+      notify('error', `${seq === null ? 'เลิกปักหมุด' : 'ปักหมุด'}ไม่สำเร็จ: ${errMsg(e)}`);
     }
+  }
+  function jumpTo(seq: number) {
+    const el = document.getElementById(`msg-${seq}`);
+    if (!el) { notify('warning', 'ข้อความนี้อยู่ไกลเกินไป — เลื่อนขึ้นเพื่อโหลดข้อความเก่าก่อน'); return; }
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 1500);
   }
   const connText =
     s.conn === 'connecting' ? 'กำลังเชื่อมต่อ…'
@@ -180,12 +221,21 @@ export default function ChatRoomPage() {
           </button>
         }
         right={room && (
-          <button className="btn btn-small btn-ghost" onClick={() => void toggleMute()} aria-label={room.muted ? 'เปิดแจ้งเตือนห้องนี้' : 'ปิดแจ้งเตือนห้องนี้'}>
+          <button className="btn btn-small btn-ghost" onClick={() => setShowMute(true)} aria-label="ตั้งค่าแจ้งเตือนห้องนี้">
             {room.muted ? '🔕' : '🔔'}
           </button>
         )}
       />
       {connText && <div className={`banner ${s.conn === 'failed' ? 'banner-error' : 'banner-warning'}`} role="status">{connText}</div>}
+      {room?.pinned && (
+        <div className="pinned-bar">
+          <button className="pinned-main" onClick={() => jumpTo(room.pinned!.seq)}>
+            <span className="small muted">📌 ข้อความที่ปักหมุด{room.pinned.sender ? ` · ${room.pinned.sender}` : ''}</span>
+            <span className="pinned-text">{room.pinned.text}</span>
+          </button>
+          {canPin && <button className="link" onClick={() => void pin(null)} aria-label="เลิกปักหมุด">✕</button>}
+        </div>
+      )}
 
       <div className="messages" ref={listRef} onScroll={onScroll}>
         {s.loadingOlder && <p className="center muted small">กำลังโหลดข้อความเก่า…</p>}
@@ -197,11 +247,21 @@ export default function ChatRoomPage() {
           return (
             <div key={m.seq}>
               {showDate && <div className="date-sep">{d}</div>}
-              <div className={`bubble-row ${mine ? 'mine' : ''}`}>
+              <div className={`bubble-row ${mine ? 'mine' : ''}`} id={`msg-${m.seq}`}>
                 <div className="bubble">
                   {!mine && isGroup && <div className="bubble-name">{m.senderName}</div>}
+                  {m.extra?.replyTo && (
+                    <button className="reply-quote" onClick={() => jumpTo(m.extra!.replyTo!.seq)}>
+                      <b>{m.extra.replyTo.senderName ?? 'ข้อความ'}</b>
+                      <span>{m.extra.replyTo.snippet ?? ''}</span>
+                    </button>
+                  )}
                   <MessageContent m={m} roomId={id} />
-                  <div className="bubble-meta">{thaiClock(m.createdAt)}</div>
+                  <div className="bubble-meta">
+                    {m.extra?.silent && <span title="ส่งแบบเงียบ">🔕 </span>}
+                    {thaiClock(m.createdAt)}
+                    <button className="bubble-more" onClick={() => setMenuFor(m)} aria-label="ตัวเลือกข้อความ">⋯</button>
+                  </div>
                 </div>
               </div>
             </div>
@@ -241,6 +301,23 @@ export default function ChatRoomPage() {
       <form className="composer" onSubmit={submit}>
         {inputError && <p className="error-text small">{inputError}</p>}
         {preparing && <p className="small muted">กำลังย่อรูป…</p>}
+        {replyTo && (
+          <div className="reply-draft">
+            <div className="grow"><b>ตอบกลับ {replyTo.senderName}</b><div className="small muted ellipsis">{replyTo.snippet}</div></div>
+            <button type="button" className="link" onClick={() => setReplyTo(null)} aria-label="ยกเลิกตอบกลับ">✕</button>
+          </div>
+        )}
+        {mentionList.length > 0 && (
+          <ul className="mention-list">
+            {mentionList.map((m) => (
+              <li key={m.id}>
+                <button type="button" onClick={() => pickMention(m)}>
+                  <Avatar name={m.displayName} url={m.pictureUrl} size={24} /> {m.displayName}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         {recording ? (
           <VoiceRecorder
             onDone={(f) => { setRecording(false); queueFile(f); }}
@@ -256,6 +333,15 @@ export default function ChatRoomPage() {
           {me.user.role === 'admin' && (
             <button type="button" className="tool" onClick={() => void openFormPicker()} disabled={s.conn === 'failed'}>📝 ฟอร์ม</button>
           )}
+          <button
+            type="button"
+            className={`tool ${silent ? 'tool-on' : ''}`}
+            onClick={() => setSilent((v) => !v)}
+            aria-pressed={silent}
+            title="ส่งแบบเงียบ: คนรับเห็นข้อความแต่มือถือไม่เด้ง"
+          >
+            {silent ? '🔕 เงียบอยู่' : '🔕 ส่งเงียบ'}
+          </button>
           <input ref={imageInput} type="file" accept="image/*" multiple hidden onChange={(e) => void onPickImages(e.target.files)} />
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => onPickFiles(e.target.files)} />
         </div>
@@ -266,7 +352,7 @@ export default function ChatRoomPage() {
             onKeyDown={onKey}
             rows={1}
             maxLength={MAX_MESSAGE_CHARS}
-            placeholder="พิมพ์ข้อความ"
+            placeholder={silent ? 'พิมพ์ข้อความ (ส่งแบบเงียบ)' : hasMembers ? 'พิมพ์ข้อความ · @ เพื่อเรียกชื่อ' : 'พิมพ์ข้อความ'}
           />
           <button className="btn" disabled={s.conn === 'failed'}>ส่ง</button>
         </div>
@@ -287,6 +373,31 @@ export default function ChatRoomPage() {
         </div>
       )}
 
+      {menuFor && (
+        <MessageMenu
+          m={menuFor}
+          canReply={!!room?.canPost}
+          canPin={canPin}
+          isPinned={room?.pinned?.seq === menuFor.seq}
+          onClose={() => setMenuFor(null)}
+          onReply={() => {
+            setReplyTo({ seq: menuFor.seq, senderName: menuFor.senderName, snippet: previewText(menuFor) });
+            setMenuFor(null);
+          }}
+          onPin={(notifyAll) => { void pin(menuFor.seq, notifyAll); setMenuFor(null); }}
+          onUnpin={() => { void pin(null); setMenuFor(null); }}
+          onCopy={async () => {
+            setMenuFor(null);
+            try { await navigator.clipboard.writeText(menuFor.body); notify('success', 'คัดลอกข้อความแล้ว'); }
+            catch { notify('error', 'คัดลอกไม่สำเร็จ — เบราว์เซอร์ไม่อนุญาตให้เข้าถึงคลิปบอร์ด'); }
+          }}
+        />
+      )}
+
+      {showMute && room && (
+        <MuteSheet room={room} onClose={() => setShowMute(false)} onSaved={(muted, mutedUntil) => setRoom({ ...room, muted, mutedUntil })} />
+      )}
+
       {showMembers && room && (
         <MembersPanel
           room={room}
@@ -295,6 +406,82 @@ export default function ChatRoomPage() {
           onChanged={() => void loadRoom()}
         />
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// แจ้งเตือน: ข้อความย่อ / เมนูข้อความ / ปิดเสียงตามเวลา
+// ---------------------------------------------------------------------
+function previewText(m: ChatMessage): string {
+  if (m.body) return m.body.slice(0, 80);
+  if (m.kind === 'image') return '[รูป]';
+  if (m.kind === 'voice') return '[ข้อความเสียง]';
+  if (m.kind === 'file') return `[ไฟล์] ${m.file?.name ?? ''}`;
+  if (m.kind === 'form') return `[ฟอร์ม] ${m.extra?.formTitle ?? ''}`;
+  return '';
+}
+
+function MessageMenu({ m, canReply, canPin, isPinned, onClose, onReply, onPin, onUnpin, onCopy }: {
+  m: ChatMessage; canReply: boolean; canPin: boolean; isPinned: boolean; onClose: () => void;
+  onReply: () => void; onPin: (notifyAll: boolean) => void; onUnpin: () => void; onCopy: () => void;
+}) {
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head"><b className="ellipsis">{m.senderName}: {previewText(m)}</b><button className="link" onClick={onClose}>ปิด</button></div>
+        {canReply && <button className="btn btn-ghost btn-block" onClick={onReply}>↩️ ตอบกลับ</button>}
+        {m.body && <button className="btn btn-ghost btn-block" onClick={onCopy}>📋 คัดลอกข้อความ</button>}
+        {canPin && !isPinned && (
+          <>
+            <button className="btn btn-ghost btn-block" onClick={() => onPin(false)}>📌 ปักหมุด (ไม่แจ้งใคร)</button>
+            <button className="btn btn-ghost btn-block" onClick={() => onPin(true)}>📌 ปักหมุด + แจ้งทุกคนในห้อง</button>
+          </>
+        )}
+        {canPin && isPinned && <button className="btn btn-ghost btn-block" onClick={onUnpin}>เลิกปักหมุด</button>}
+      </div>
+    </div>
+  );
+}
+
+const MUTE_OPTIONS: { key: '1h' | '8h' | '2d' | 'forever'; label: string }[] = [
+  { key: '1h', label: '1 ชั่วโมง' }, { key: '8h', label: '8 ชั่วโมง' }, { key: '2d', label: '2 วัน' }, { key: 'forever', label: 'ตลอดไป' },
+];
+
+function MuteSheet({ room, onClose, onSaved }: {
+  room: Room; onClose: () => void; onSaved: (muted: boolean, mutedUntil: string | null) => void;
+}) {
+  const notify = useNotify();
+  const [busy, setBusy] = useState(false);
+  async function save(body: { muted: boolean; for?: string }) {
+    setBusy(true);
+    try {
+      const r = await api.post<{ muted: boolean; mutedUntil: string | null }>(`/api/rooms/${encodeURIComponent(room.id)}/mute`, body);
+      onSaved(r.muted, r.mutedUntil);
+      notify('success', !r.muted ? 'เปิดแจ้งเตือนห้องนี้แล้ว'
+        : r.mutedUntil ? `ปิดเสียงถึง ${thaiDate(r.mutedUntil)} ${thaiClock(r.mutedUntil)} น.` : 'ปิดเสียงห้องนี้ตลอดไปแล้ว');
+      onClose();
+    } catch (e) {
+      notify('error', `ตั้งค่าแจ้งเตือนไม่สำเร็จ: ${errMsg(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head"><b>แจ้งเตือนห้องนี้</b><button className="link" onClick={onClose}>ปิด</button></div>
+        <p className="small">
+          ตอนนี้: <b>{!room.muted ? 'เปิดอยู่ 🔔'
+            : room.mutedUntil ? `ปิดเสียงถึง ${thaiDate(room.mutedUntil)} ${thaiClock(room.mutedUntil)} น.` : 'ปิดเสียงตลอด 🔕'}</b>
+        </p>
+        {room.muted && <button className="btn btn-block" disabled={busy} onClick={() => void save({ muted: false })}>🔔 เปิดแจ้งเตือน</button>}
+        <p className="small muted">ปิดเสียงเป็นเวลา:</p>
+        {MUTE_OPTIONS.map((o) => (
+          <button key={o.key} className="btn btn-ghost btn-block" disabled={busy} onClick={() => void save({ muted: true, for: o.key })}>🔕 {o.label}</button>
+        ))}
+        <p className="small muted">ปิดเสียงแล้วถ้ามีคน @ชื่อคุณ หรือตอบกลับข้อความคุณ ยังเด้งอยู่ (ปิดได้ที่หน้า ตั้งค่าแจ้งเตือน)</p>
+      </div>
     </div>
   );
 }

@@ -21,8 +21,22 @@ export const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'
 /** ชนิดเสียงที่รับ (ตัด ;codecs=... ออกก่อนเทียบ) */
 export const VOICE_MIMES = ['audio/mp4', 'audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/aac'];
 
-/** ข้อมูลเสริมของข้อความ (เฟส 4) — การ์ดฟอร์ม: { formId, formTitle } */
-export interface MessageExtra { formId?: string; formTitle?: string; orderId?: number }
+/** ข้อความที่ถูกตอบกลับ (ห้องเติมข้อมูลจริงให้เอง หน้าเว็บส่งมาแค่ seq) */
+export interface ReplyRef { seq: number; senderId?: string; senderName?: string; snippet?: string }
+
+/** ข้อมูลเสริมของข้อความ — การ์ดฟอร์ม { formId, formTitle } · ออเดอร์ { orderId }
+ *  แจ้งเตือน: silent = ส่งแบบเงียบ (ไม่เด้ง) · replyTo = ตอบกลับข้อความไหน */
+export interface MessageExtra { formId?: string; formTitle?: string; orderId?: number; silent?: boolean; replyTo?: ReplyRef }
+
+/** สิ่งที่ส่งถึงแอปของผู้ใช้ (UserHub) เมื่อมีข้อความใหม่ในห้องที่ไม่ได้เปิดดูอยู่ */
+export interface ActivityFrame {
+  type: 'activity';
+  roomId: string;
+  notify: boolean;        // ควรเด้งแบนเนอร์ในแอปไหม (ผ่านกฎปิดเสียง/ตั้งค่าแล้ว)
+  title: string;
+  body: string;
+  unread: number;         // ยังไม่อ่านรวมทุกห้อง (ไม่นับห้องที่ปิดเสียง) — ใช้ทำตัวเลขบนไอคอน
+}
 
 export interface FileInfo {
   id: string;
@@ -54,6 +68,7 @@ export type ClientFrame =
   | { type: 'sync'; afterSeq: number }
   | { type: 'read'; seq: number }
   | { type: 'presence'; visible: boolean } // เฟส 3: หน้าจอห้องนี้เปิดอยู่ไหม (เปิดอยู่ = ไม่ส่งแจ้งเตือน)
+  | { type: 'presence-app'; visible: boolean }  // UserHub: แอปเปิดอยู่บนจอไหม (ใช้แทนแจ้งเตือนมือถือ)
   | { type: 'ping' };
 
 // ---------- ห้อง → หน้าเว็บ ----------
@@ -63,4 +78,6 @@ export type ServerFrame =
   | { type: 'sync'; messages: ChatMessage[]; hasMore: boolean }
   | { type: 'error'; clientId?: string; code: string; message: string }
   | { type: 'warning'; code: string; message: string }
-  | { type: 'pong' };
+  | { type: 'pong' }
+  | { type: 'room_update' }   // ข้อมูลห้องเปลี่ยน (เช่น ปักหมุด) → หน้าเว็บโหลดข้อมูลห้องใหม่
+  | ActivityFrame;

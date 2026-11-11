@@ -18,6 +18,7 @@ import { thaiAfter, nowThai } from '../shared/time';
 export interface Env {
   DB: D1Database;
   ROOM: DurableObjectNamespace;
+  HUB: DurableObjectNamespace;
   FILES: R2Bucket;
   PUSH_QUEUE: Queue<import('./push').PushJob>;
   ASSETS: Fetcher;

@@ -96,6 +96,17 @@ export default function AdminBotsPage() {
               webhook secret (ใส่ตรวจหัว X-Bot-Secret ใน n8n): <code>{b.webhookSecret}</code>{' '}
               <button className="link" onClick={() => void copy(b.webhookSecret)}>คัดลอก</button>
             </div>
+            <label className="small">
+              บอทส่งแจ้งเตือนตรง (/api/bot/notify) ถึง:{' '}
+              <select
+                value={b.notifyScope}
+                disabled={busy === b.id}
+                onChange={(e) => void act(b.id, () => api.post(`/api/admin/bots/${b.id}`, { notifyScope: e.target.value }), 'บันทึกขอบเขตแจ้งเตือนแล้ว')}
+              >
+                <option value="contacted">เฉพาะคนที่เคยคุยกับบอท (แนะนำ)</option>
+                <option value="all">ทุกคนในระบบ (บอทเปิดแชท 1:1 ให้เอง)</option>
+              </select>
+            </label>
             <div className="small muted">ส่งถึงบอทสำเร็จล่าสุด {when(b.lastDeliveryAt)}</div>
             {b.lastError && b.failCount > 0 && <div className="small error-text">ส่งไม่สำเร็จล่าสุด {when(b.lastErrorAt)} ({b.failCount} ครั้งติด): {b.lastError}</div>}
             <div className="row-actions wrap">
