@@ -8,6 +8,7 @@
 //                bots (แอดมินจัดการ) / bot-api (บอทเรียกด้วย token) / forms / orders   ← เฟส 4
 //                invites (ลิงก์เชิญเข้าชาเนล/กลุ่ม)
 //                notify (ระบบแจ้งเตือนแบบ Telegram: ปิดเสียงมีเวลา, ตั้งค่ารวม, ปักหมุด, แอปเปิดอยู่, บอทแจ้งเตือน)
+//                เฟส 5: prefs (ธีม/ตัวอักษร) / friends (เพื่อน) / stickers / notes (โน้ตในห้อง + ส่วนตัว)
 //   3. ตัวช่วยเรื่องห้อง (ตรวจสมาชิก, สิทธิ์โพสต์)
 //   4. Entry point (fetch + scheduled: ลบไฟล์ครบ 180 วัน + queue: ส่งแจ้งเตือน)
 //
@@ -24,7 +25,7 @@ import { cleanupFiles } from './cleanup';
 import { PushJob, deliverWebhook, getVapidKeys, handlePushQueue, sendToUsers } from './push';
 import {
   ApiError, Env, Need, User, clearSessionCookie, db, fail, newId, ok, randomToken, readCookie, readJson,
-  requireBot, requireUser, sha256, SESSION_COOKIE, userOut,
+  requireBot, requireUser, sha256, SESSION_COOKIE, userOut, contactableIds, friendPair,
 } from './lib';
 import { FormField, OrderStatus, ORDER_STATUS_TH, checkFormDef, checkSubmission } from '../shared/forms';
 import { lineCallback, lineConfigError, lineStart } from './auth-line';
@@ -135,6 +136,38 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/rooms/:id/invites/:code/revoke', need: 'active', handler: revokeInvite },
   { method: 'GET',  pattern: '/api/invites/:code',            need: 'public', handler: inviteInfo },
   { method: 'POST', pattern: '/api/invites/:code/join',       need: 'any',    handler: joinByInvite },
+
+  // ---------- prefs (เฟส 5): ธีม + ขนาดตัวอักษร จำต่อบัญชี ----------
+  { method: 'GET',  pattern: '/api/me/prefs',                 need: 'active', handler: getPrefs },
+  { method: 'POST', pattern: '/api/me/prefs',                 need: 'active', handler: savePrefs },
+
+  // ---------- friends (เฟส 5): แชท 1:1 / เพิ่มเข้ากลุ่ม ได้เฉพาะเพื่อน (ยกเว้นแอดมินระบบ + บอท) ----------
+  { method: 'GET',  pattern: '/api/friends',                  need: 'active', handler: listFriends },
+  { method: 'POST', pattern: '/api/friends/request',          need: 'active', handler: requestFriend },
+  { method: 'POST', pattern: '/api/friends/:userId/accept',   need: 'active', handler: acceptFriend },
+  { method: 'POST', pattern: '/api/friends/:userId/remove',   need: 'active', handler: removeFriend },
+
+  // ---------- stickers (เฟส 5): แอดมินระบบเพิ่ม · ทุกคนส่งได้ ----------
+  { method: 'GET',  pattern: '/api/stickers',                 need: 'active', handler: listStickers },
+  { method: 'GET',  pattern: '/api/stickers/:stickerId/image', need: 'active', handler: stickerImage },
+  { method: 'GET',  pattern: '/api/admin/stickers',           need: 'admin',  handler: adminListStickers },
+  { method: 'POST', pattern: '/api/admin/stickers/packs',     need: 'admin',  handler: adminCreatePack },
+  { method: 'POST', pattern: '/api/admin/stickers/packs/:packId', need: 'admin', handler: adminUpdatePack },
+  { method: 'POST', pattern: '/api/admin/stickers/packs/:packId/upload', need: 'admin', handler: adminUploadSticker },
+  { method: 'POST', pattern: '/api/admin/stickers/:stickerId', need: 'admin', handler: adminUpdateSticker },
+
+  // ---------- notes (เฟส 5): โน้ตในห้อง (สมาชิกเห็นทุกคน + คอมเมนต์) · โน้ตส่วนตัว ----------
+  { method: 'GET',  pattern: '/api/rooms/:id/notes',          need: 'active', handler: listRoomNotes },
+  { method: 'POST', pattern: '/api/rooms/:id/notes',          need: 'active', handler: createRoomNote },
+  { method: 'GET',  pattern: '/api/notes/:noteId',            need: 'active', handler: getNote },
+  { method: 'POST', pattern: '/api/notes/:noteId',            need: 'active', handler: updateNote },
+  { method: 'POST', pattern: '/api/notes/:noteId/delete',     need: 'active', handler: deleteNote },
+  { method: 'POST', pattern: '/api/notes/:noteId/comments',   need: 'active', handler: addNoteComment },
+  { method: 'POST', pattern: '/api/note-comments/:commentId/delete', need: 'active', handler: deleteNoteComment },
+  { method: 'GET',  pattern: '/api/me/notes',                 need: 'active', handler: listMyNotes },
+  { method: 'POST', pattern: '/api/me/notes',                 need: 'active', handler: createMyNote },
+  { method: 'POST', pattern: '/api/me/notes/:noteId',         need: 'active', handler: updateMyNote },
+  { method: 'POST', pattern: '/api/me/notes/:noteId/delete',  need: 'active', handler: deleteMyNote },
 ];
 
 function match(pattern: string, path: string): Record<string, string> | null {
@@ -280,14 +313,25 @@ async function adminSetStatus(c: Ctx) {
 }
 
 // ---------- users ----------
+/** รายชื่อผู้ใช้ทั้งหมด + สถานะเพื่อน (เฟส 5) · canChat = ทักแชท 1:1 / เพิ่มเข้ากลุ่มได้เลย */
 async function listUsers(c: Ctx) {
+  const me = c.user!;
   const rows = await db('อ่านรายชื่อผู้ใช้', () =>
     c.env.DB.prepare(
-      `SELECT id, display_name, picture_url, status, role, is_bot FROM users
-       WHERE status = 'active' AND id <> ? ORDER BY is_bot, display_name`,
-    ).bind(c.user!.id).all<Parameters<typeof userOut>[0]>(),
+      `SELECT u.id, u.display_name, u.picture_url, u.status, u.role, u.is_bot, f.status AS f_status, f.requested_by
+       FROM users u
+       LEFT JOIN friendships f ON f.user_low = MIN(?1, u.id) AND f.user_high = MAX(?1, u.id)
+       WHERE u.status = 'active' AND u.id <> ?1 ORDER BY u.is_bot, u.display_name`,
+    ).bind(me.id).all<Parameters<typeof userOut>[0] & { f_status: string | null; requested_by: string | null }>(),
   );
-  return ok({ users: rows.results.map(userOut) });
+  const meExempt = me.role === 'admin' || me.isBot;
+  return ok({
+    users: rows.results.map((r) => {
+      const friend = r.f_status === 'accepted' ? 'friend'
+        : r.f_status === 'pending' ? (r.requested_by === me.id ? 'outgoing' : 'incoming') : 'none';
+      return { ...userOut(r), friend, canChat: friend === 'friend' || meExempt || r.is_bot === 1 || r.role === 'admin' };
+    }),
+  });
 }
 
 // ---------- rooms ----------
@@ -356,6 +400,15 @@ async function activeUserIds(env: Env, ids: string[]): Promise<Set<string>> {
   return found;
 }
 
+/** เฟส 5: เพิ่มเข้ากลุ่มได้เฉพาะเพื่อน (ยกเว้นแอดมินระบบ + บอท) — ไม่ผ่านบอกจำนวนคนที่ติด */
+async function requireContactable(env: Env, me: User, ids: string[]) {
+  const okIds = await contactableIds(env, me, ids);
+  const notFriends = ids.filter((x) => !okIds.has(x));
+  if (notFriends.length) {
+    throw new ApiError(403, 'NOT_FRIEND', `มี ${notFriends.length} คนที่ยังไม่ได้เป็นเพื่อนกับคุณ — เพิ่มเข้ากลุ่มได้เฉพาะเพื่อน (คนอื่นให้ใช้ลิงก์เชิญ)`);
+  }
+}
+
 async function openDm(c: Ctx) {
   const body = await readJson<{ userId?: unknown }>(c.req);
   const peerId = body.userId;
@@ -363,6 +416,10 @@ async function openDm(c: Ctx) {
   if (peerId === c.user!.id) throw new ApiError(400, 'SELF', 'เปิดแชท 1:1 กับตัวเองไม่ได้');
   if (!(await activeUserIds(c.env, [peerId])).has(peerId)) {
     throw new ApiError(404, 'USER_NOT_ACTIVE', 'ไม่พบผู้ใช้นี้ หรือยังไม่ได้รับอนุมัติ');
+  }
+  // เฟส 5: ทักแชท 1:1 ได้เฉพาะเพื่อน (ยกเว้นแอดมินระบบ + บอท) — ห้องเดิมที่มีอยู่ก็ตรวจเหมือนกัน
+  if (!(await contactableIds(c.env, c.user!, [peerId])).has(peerId)) {
+    throw new ApiError(403, 'NOT_FRIEND', 'ยังไม่ได้เป็นเพื่อนกัน — ส่งคำขอเป็นเพื่อนก่อน แล้วรออีกฝ่ายกดยอมรับ');
   }
   const dmKey = [c.user!.id, peerId].sort().join(':');
   const existing = await db('หาแชท 1:1 เดิม', () =>
@@ -400,6 +457,7 @@ async function createGroup(c: Ctx) {
   if (missing.length) {
     throw new ApiError(400, 'MEMBERS_NOT_ACTIVE', `มีสมาชิก ${missing.length} คนที่ไม่พบหรือยังไม่ได้รับอนุมัติ`);
   }
+  await requireContactable(c.env, c.user!, ids);
 
   const id = newId();
   const now = nowThai();
@@ -444,6 +502,7 @@ async function addMembers(c: Ctx) {
   if (missing.length) {
     throw new ApiError(400, 'MEMBERS_NOT_ACTIVE', `มีสมาชิก ${missing.length} คนที่ไม่พบหรือยังไม่ได้รับอนุมัติ`);
   }
+  if (room.type === 'group') await requireContactable(c.env, c.user!, ids); // เฟส 5: กลุ่มเพิ่มได้เฉพาะเพื่อน (ชาเนลเหมือนเดิม)
   const now = nowThai();
   // คนใหม่เริ่มนับ "ยังไม่อ่าน" จากข้อความถัดไป
   await db('เพิ่มสมาชิกกลุ่ม', () =>
@@ -1375,6 +1434,440 @@ async function joinByInvite(c: Ctx) {
 
 // =====================================================================
 // 3. ตัวช่วยเรื่องห้อง
+// =====================================================================
+// เฟส 5 — ค่าที่ผู้ใช้เลือก · เพื่อน · สติกเกอร์ · โน้ต
+// =====================================================================
+
+// ---------- prefs: ธีม + ขนาดตัวอักษร (จำต่อบัญชี) ----------
+const THEMES = ['system', 'light', 'dark'] as const;
+
+async function getPrefs(c: Ctx) {
+  const r = await db('อ่านค่าที่เลือกไว้', () =>
+    c.env.DB.prepare(`SELECT theme, font_level FROM user_prefs WHERE user_id = ?`).bind(c.user!.id)
+      .first<{ theme: string; font_level: number }>(),
+  );
+  return ok({ prefs: { theme: r?.theme ?? 'system', fontLevel: r?.font_level ?? 3 } });
+}
+
+async function savePrefs(c: Ctx) {
+  const body = await readJson<{ theme?: unknown; fontLevel?: unknown }>(c.req);
+  if (typeof body.theme !== 'string' || !(THEMES as readonly string[]).includes(body.theme)) {
+    throw new ApiError(400, 'BAD_THEME', 'ธีมต้องเป็น system, light หรือ dark');
+  }
+  if (typeof body.fontLevel !== 'number' || !Number.isInteger(body.fontLevel) || body.fontLevel < 1 || body.fontLevel > 5) {
+    throw new ApiError(400, 'BAD_FONT_LEVEL', 'ขนาดตัวอักษรต้องเป็นระดับ 1–5');
+  }
+  await db('บันทึกธีม/ขนาดตัวอักษร', () =>
+    c.env.DB.prepare(
+      `INSERT INTO user_prefs (user_id, theme, font_level, updated_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET theme = excluded.theme, font_level = excluded.font_level, updated_at = excluded.updated_at`,
+    ).bind(c.user!.id, body.theme, body.fontLevel, nowThai()).run(),
+  );
+  return ok({ prefs: { theme: body.theme, fontLevel: body.fontLevel } });
+}
+
+// ---------- friends: ส่งคำขอ → อีกฝ่ายกดยอมรับ · ปฏิเสธ/ยกเลิก/เลิกเป็นเพื่อน = ลบแถว ----------
+type FriendRow = {
+  id: string; display_name: string; picture_url: string | null;
+  status: 'pending' | 'accepted'; requested_by: string; created_at: string; accepted_at: string | null;
+};
+
+async function listFriends(c: Ctx) {
+  const me = c.user!.id;
+  const rows = await db('อ่านรายชื่อเพื่อน', () =>
+    c.env.DB.prepare(
+      `SELECT u.id, u.display_name, u.picture_url, f.status, f.requested_by, f.created_at, f.accepted_at
+       FROM friendships f JOIN users u ON u.id = CASE WHEN f.user_low = ?1 THEN f.user_high ELSE f.user_low END
+       WHERE (f.user_low = ?1 OR f.user_high = ?1) AND u.status = 'active'
+       ORDER BY u.display_name`,
+    ).bind(me).all<FriendRow>(),
+  );
+  const out = (r: FriendRow) => ({ id: r.id, displayName: r.display_name, pictureUrl: r.picture_url, since: r.accepted_at ?? r.created_at });
+  return ok({
+    friends: rows.results.filter((r) => r.status === 'accepted').map(out),
+    incoming: rows.results.filter((r) => r.status === 'pending' && r.requested_by !== me).map(out),
+    outgoing: rows.results.filter((r) => r.status === 'pending' && r.requested_by === me).map(out),
+  });
+}
+
+async function readFriendship(env: Env, a: string, b: string) {
+  const [low, high] = friendPair(a, b);
+  return db('อ่านสถานะเพื่อน', () =>
+    env.DB.prepare(`SELECT status, requested_by FROM friendships WHERE user_low = ? AND user_high = ?`)
+      .bind(low, high).first<{ status: 'pending' | 'accepted'; requested_by: string }>(),
+  );
+}
+
+async function requestFriend(c: Ctx) {
+  const body = await readJson<{ userId?: unknown }>(c.req);
+  const peerId = body.userId;
+  if (typeof peerId !== 'string' || !peerId) throw new ApiError(400, 'NO_USER', 'กรุณาเลือกคนที่จะเพิ่มเป็นเพื่อน');
+  if (peerId === c.user!.id) throw new ApiError(400, 'SELF', 'เพิ่มตัวเองเป็นเพื่อนไม่ได้');
+  const peer = await db('อ่านข้อมูลผู้ใช้', () =>
+    c.env.DB.prepare(`SELECT id, status, is_bot FROM users WHERE id = ?`).bind(peerId)
+      .first<{ id: string; status: string; is_bot: number }>(),
+  );
+  if (!peer || peer.status !== 'active') throw new ApiError(404, 'USER_NOT_ACTIVE', 'ไม่พบผู้ใช้นี้ หรือยังไม่ได้รับอนุมัติ');
+  if (peer.is_bot) throw new ApiError(400, 'IS_BOT', 'บอทไม่ต้องเพิ่มเป็นเพื่อน — ทักแชทได้เลย');
+
+  const cur = await readFriendship(c.env, c.user!.id, peerId);
+  if (cur?.status === 'accepted') throw new ApiError(409, 'ALREADY_FRIEND', 'เป็นเพื่อนกันอยู่แล้ว');
+  if (cur && cur.requested_by === c.user!.id) throw new ApiError(409, 'ALREADY_REQUESTED', 'ส่งคำขอไปแล้ว รออีกฝ่ายกดยอมรับ');
+  const [low, high] = friendPair(c.user!.id, peerId);
+  const now = nowThai();
+  if (cur) {
+    // อีกฝ่ายส่งคำขอมาก่อนแล้ว → ถือว่ายอมรับเลย
+    await db('ยอมรับคำขอเป็นเพื่อน', () =>
+      c.env.DB.prepare(`UPDATE friendships SET status = 'accepted', accepted_at = ? WHERE user_low = ? AND user_high = ?`)
+        .bind(now, low, high).run(),
+    );
+    return ok({ status: 'accepted' });
+  }
+  await db('ส่งคำขอเป็นเพื่อน', () =>
+    c.env.DB.prepare(
+      `INSERT INTO friendships (user_low, user_high, status, requested_by, created_at) VALUES (?, ?, 'pending', ?, ?)`,
+    ).bind(low, high, c.user!.id, now).run(),
+  );
+  // แจ้งอีกฝ่าย — ส่งไม่ถึงไม่ทำให้คำขอล้ม (คำขอบันทึกแล้ว) แต่บอกผู้ส่งว่าแจ้งเตือนได้หรือไม่
+  let notified = false;
+  try {
+    const r = await sendToUsers(c.env, [peerId], {
+      title: 'คำขอเป็นเพื่อน', body: `${c.user!.displayName} ขอเป็นเพื่อนกับคุณ`, url: '/friends', tag: 'friend-requests',
+    });
+    notified = r.sent > 0;
+  } catch (err) {
+    console.error('แจ้งเตือนคำขอเป็นเพื่อนไม่สำเร็จ', err);
+  }
+  return ok({ status: 'pending', notified }, 201);
+}
+
+async function acceptFriend(c: Ctx) {
+  const cur = await readFriendship(c.env, c.user!.id, c.params.userId);
+  if (!cur) throw new ApiError(404, 'NO_REQUEST', 'ไม่พบคำขอเป็นเพื่อนนี้ (อาจถูกยกเลิกแล้ว)');
+  if (cur.status === 'accepted') throw new ApiError(409, 'ALREADY_FRIEND', 'เป็นเพื่อนกันอยู่แล้ว');
+  if (cur.requested_by === c.user!.id) throw new ApiError(400, 'OWN_REQUEST', 'คำขอนี้คุณเป็นคนส่ง รออีกฝ่ายกดยอมรับ');
+  const [low, high] = friendPair(c.user!.id, c.params.userId);
+  const r = await db('ยอมรับคำขอเป็นเพื่อน', () =>
+    c.env.DB.prepare(
+      `UPDATE friendships SET status = 'accepted', accepted_at = ? WHERE user_low = ? AND user_high = ? AND status = 'pending'`,
+    ).bind(nowThai(), low, high).run(),
+  );
+  if (r.meta.changes !== 1) throw new ApiError(409, 'CHANGED', 'สถานะคำขอเปลี่ยนไปแล้ว กรุณาโหลดหน้าใหม่');
+  return ok({ status: 'accepted' });
+}
+
+/** ปฏิเสธคำขอ / ยกเลิกคำขอที่ส่งไป / เลิกเป็นเพื่อน (แชท 1:1 เดิมยังอ่านได้ แต่ส่งต่อไม่ได้) */
+async function removeFriend(c: Ctx) {
+  const cur = await readFriendship(c.env, c.user!.id, c.params.userId);
+  if (!cur) throw new ApiError(404, 'NOT_FRIEND', 'ไม่ได้เป็นเพื่อนหรือมีคำขอค้างกับผู้ใช้นี้');
+  const [low, high] = friendPair(c.user!.id, c.params.userId);
+  await db('ลบความเป็นเพื่อน', () =>
+    c.env.DB.prepare(`DELETE FROM friendships WHERE user_low = ? AND user_high = ?`).bind(low, high).run(),
+  );
+  const was = cur.status === 'accepted' ? 'unfriended' : cur.requested_by === c.user!.id ? 'cancelled' : 'declined';
+  return ok({ removed: was });
+}
+
+// ---------- stickers: แอดมินระบบเพิ่มชุด/ภาพ · ทุกคนส่งได้ · ภาพเก็บถาวร (ไม่ลบตาม 180 วัน) ----------
+const STICKER_MIMES = ['image/png', 'image/webp', 'image/gif'];
+const STICKER_MAX_BYTES = 512 * 1024;
+
+type PackRow = { id: string; name: string; active: number; sort: number };
+type StickerRow = { id: string; pack_id: string; mime: string; size: number; sort: number; active: number };
+
+async function loadStickerPacks(env: Env, onlyActive: boolean) {
+  const packs = await db('อ่านชุดสติกเกอร์', () =>
+    env.DB.prepare(`SELECT id, name, active, sort FROM sticker_packs ${onlyActive ? 'WHERE active = 1' : ''} ORDER BY sort, created_at`)
+      .all<PackRow>(),
+  );
+  const stickers = await db('อ่านสติกเกอร์', () =>
+    env.DB.prepare(`SELECT id, pack_id, mime, size, sort, active FROM stickers ${onlyActive ? 'WHERE active = 1' : ''} ORDER BY sort, created_at`)
+      .all<StickerRow>(),
+  );
+  return packs.results.map((p) => ({
+    id: p.id, name: p.name, active: p.active === 1,
+    stickers: stickers.results.filter((s) => s.pack_id === p.id).map((s) => ({ id: s.id, active: s.active === 1, size: s.size })),
+  }));
+}
+
+async function listStickers(c: Ctx) {
+  return ok({ packs: (await loadStickerPacks(c.env, true)).filter((p) => p.stickers.length > 0) });
+}
+
+/** ภาพสติกเกอร์ — สติกเกอร์ที่ปิดใช้แล้วยังเปิดได้ (ข้อความเก่าในแชทต้องแสดงได้) */
+async function stickerImage(c: Ctx) {
+  const s = await db('อ่านสติกเกอร์', () =>
+    c.env.DB.prepare(`SELECT r2_key, mime FROM stickers WHERE id = ?`).bind(c.params.stickerId).first<{ r2_key: string; mime: string }>(),
+  );
+  if (!s) throw new ApiError(404, 'STICKER_NOT_FOUND', 'ไม่พบสติกเกอร์นี้');
+  let obj: R2ObjectBody | null;
+  try {
+    obj = await c.env.FILES.get(s.r2_key);
+  } catch (err) {
+    console.error('อ่านสติกเกอร์จาก R2 ไม่สำเร็จ', err);
+    throw new ApiError(502, 'R2_FAILED', 'เปิดสติกเกอร์ไม่สำเร็จ (ที่เก็บไฟล์ขัดข้อง)');
+  }
+  if (!obj) throw new ApiError(404, 'STICKER_MISSING', 'ไม่พบภาพสติกเกอร์ในที่เก็บ');
+  return new Response(obj.body, {
+    headers: {
+      'Content-Type': s.mime, 'X-Content-Type-Options': 'nosniff',
+      'Cache-Control': 'private, max-age=31536000, immutable', // ภาพสติกเกอร์ไม่เปลี่ยน (เปลี่ยน = ไอดีใหม่)
+    },
+  });
+}
+
+async function adminListStickers(c: Ctx) {
+  return ok({ packs: await loadStickerPacks(c.env, false) });
+}
+
+function packName(v: unknown): string {
+  const name = typeof v === 'string' ? v.trim() : '';
+  if (name.length < 1 || name.length > 40) throw new ApiError(400, 'BAD_NAME', 'ชื่อชุดสติกเกอร์ต้องมี 1–40 ตัวอักษร');
+  return name;
+}
+
+async function adminCreatePack(c: Ctx) {
+  const body = await readJson<{ name?: unknown }>(c.req);
+  const id = newId();
+  await db('สร้างชุดสติกเกอร์', () =>
+    c.env.DB.prepare(`INSERT INTO sticker_packs (id, name, created_by, created_at) VALUES (?, ?, ?, ?)`)
+      .bind(id, packName(body.name), c.user!.id, nowThai()).run(),
+  );
+  return ok({ packId: id }, 201);
+}
+
+async function adminUpdatePack(c: Ctx) {
+  const body = await readJson<{ name?: unknown; active?: unknown }>(c.req);
+  const sets: string[] = [];
+  const vals: unknown[] = [];
+  if (body.name !== undefined) { sets.push('name = ?'); vals.push(packName(body.name)); }
+  if (body.active !== undefined) {
+    if (typeof body.active !== 'boolean') throw new ApiError(400, 'BAD_ACTIVE', 'ค่าเปิดใช้ต้องเป็น true หรือ false');
+    sets.push('active = ?'); vals.push(body.active ? 1 : 0);
+  }
+  if (!sets.length) throw new ApiError(400, 'NOTHING', 'ไม่มีอะไรให้แก้');
+  const r = await db('แก้ชุดสติกเกอร์', () =>
+    c.env.DB.prepare(`UPDATE sticker_packs SET ${sets.join(', ')} WHERE id = ?`).bind(...vals, c.params.packId).run(),
+  );
+  if (r.meta.changes !== 1) throw new ApiError(404, 'PACK_NOT_FOUND', 'ไม่พบชุดสติกเกอร์นี้');
+  return ok({ updated: true });
+}
+
+/** อัปภาพสติกเกอร์: body = ภาพดิบ · Content-Type = image/png, image/webp หรือ image/gif · ไม่เกิน 512 KB */
+async function adminUploadSticker(c: Ctx) {
+  const pack = await db('อ่านชุดสติกเกอร์', () =>
+    c.env.DB.prepare(`SELECT id FROM sticker_packs WHERE id = ?`).bind(c.params.packId).first(),
+  );
+  if (!pack) throw new ApiError(404, 'PACK_NOT_FOUND', 'ไม่พบชุดสติกเกอร์นี้');
+  const mime = (c.req.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+  if (!STICKER_MIMES.includes(mime)) throw new ApiError(415, 'BAD_STICKER_TYPE', 'สติกเกอร์รองรับเฉพาะ PNG, WEBP, GIF');
+  const size = Number(c.req.headers.get('Content-Length'));
+  if (!Number.isFinite(size) || size <= 0) throw new ApiError(411, 'NO_LENGTH', 'ไม่ทราบขนาดไฟล์ หรือไฟล์ว่าง');
+  if (size > STICKER_MAX_BYTES) throw new ApiError(413, 'TOO_LARGE', 'ภาพสติกเกอร์ต้องไม่เกิน 512 KB');
+  if (!c.req.body) throw new ApiError(400, 'NO_BODY', 'ไม่พบตัวไฟล์ที่ส่งมา');
+
+  const id = newId();
+  const key = `stickers/${c.params.packId}/${id}`;
+  try {
+    await c.env.FILES.put(key, c.req.body, { httpMetadata: { contentType: mime } });
+  } catch (err) {
+    console.error('เขียนสติกเกอร์ลง R2 ไม่สำเร็จ', err);
+    throw new ApiError(502, 'R2_FAILED', 'อัปโหลดสติกเกอร์ไม่สำเร็จ กรุณาลองใหม่');
+  }
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO stickers (id, pack_id, r2_key, mime, size, sort, created_at)
+       VALUES (?, ?, ?, ?, ?, (SELECT COALESCE(MAX(sort), 0) + 1 FROM stickers WHERE pack_id = ?), ?)`,
+    ).bind(id, c.params.packId, key, mime, size, c.params.packId, nowThai()).run();
+  } catch (err) {
+    console.error('บันทึกสติกเกอร์ลง D1 ไม่สำเร็จ', err);
+    try {
+      await c.env.FILES.delete(key);
+    } catch (delErr) {
+      console.error('ลบสติกเกอร์ที่ค้างใน R2 ไม่สำเร็จ', key, delErr);
+    }
+    throw new ApiError(500, 'DB_FAILED', 'บันทึกสติกเกอร์ไม่สำเร็จ กรุณาลองใหม่');
+  }
+  return ok({ stickerId: id }, 201);
+}
+
+async function adminUpdateSticker(c: Ctx) {
+  const body = await readJson<{ active?: unknown }>(c.req);
+  if (typeof body.active !== 'boolean') throw new ApiError(400, 'BAD_ACTIVE', 'ค่าเปิดใช้ต้องเป็น true หรือ false');
+  const r = await db('แก้สติกเกอร์', () =>
+    c.env.DB.prepare(`UPDATE stickers SET active = ? WHERE id = ?`).bind(body.active ? 1 : 0, c.params.stickerId).run(),
+  );
+  if (r.meta.changes !== 1) throw new ApiError(404, 'STICKER_NOT_FOUND', 'ไม่พบสติกเกอร์นี้');
+  return ok({ updated: true });
+}
+
+// ---------- notes: โน้ตในห้อง (สมาชิกเห็นทุกคน + คอมเมนต์) และโน้ตส่วนตัว ----------
+const NOTE_MAX = 5000;
+const COMMENT_MAX = 1000;
+const MY_NOTE_MAX = 10000;
+
+function noteText(v: unknown, max: number, what: string): string {
+  const t = typeof v === 'string' ? v.trim() : '';
+  if (!t) throw new ApiError(400, 'EMPTY', `${what}ว่าง บันทึกไม่ได้`);
+  if (t.length > max) throw new ApiError(400, 'TOO_LONG', `${what}ยาวเกิน ${max.toLocaleString('th-TH')} ตัวอักษร`);
+  return t;
+}
+
+type NoteRow = {
+  id: string; room_id: string; author_id: string; author_name: string; author_picture: string | null;
+  body: string; created_at: string; updated_at: string; comments: number;
+};
+const noteOut = (n: NoteRow) => ({
+  id: n.id, roomId: n.room_id, authorId: n.author_id, authorName: n.author_name, authorPicture: n.author_picture,
+  body: n.body, createdAt: n.created_at, updatedAt: n.updated_at, comments: n.comments,
+});
+const NOTE_SELECT = `SELECT n.id, n.room_id, n.author_id, u.display_name AS author_name, u.picture_url AS author_picture,
+                            n.body, n.created_at, n.updated_at,
+                            (SELECT COUNT(*) FROM note_comments k WHERE k.note_id = n.id) AS comments
+                     FROM room_notes n JOIN users u ON u.id = n.author_id`;
+
+async function listRoomNotes(c: Ctx) {
+  await requireMember(c.env, c.params.id, c.user!.id);
+  const rows = await db('อ่านโน้ตในห้อง', () =>
+    c.env.DB.prepare(`${NOTE_SELECT} WHERE n.room_id = ? ORDER BY n.created_at DESC LIMIT 200`).bind(c.params.id).all<NoteRow>(),
+  );
+  return ok({ notes: rows.results.map(noteOut) });
+}
+
+async function createRoomNote(c: Ctx) {
+  const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
+  requirePoster(room.type, role); // ชาเนล: เฉพาะเจ้าของ/แอดมินชาเนลสร้างโน้ตได้
+  const body = await readJson<{ body?: unknown }>(c.req);
+  const text = noteText(body.body, NOTE_MAX, 'โน้ต');
+  const id = newId();
+  const now = nowThai();
+  await db('บันทึกโน้ต', () =>
+    c.env.DB.prepare(`INSERT INTO room_notes (id, room_id, author_id, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .bind(id, c.params.id, c.user!.id, text, now, now).run(),
+  );
+  // แจ้งในห้องว่ามีโน้ตใหม่ (แบบ LINE) — โน้ตบันทึกแล้ว ถ้าแจ้งไม่สำเร็จให้ตอบคำเตือนพร้อมเหตุผล
+  const firstLine = text.split('\n')[0].slice(0, 80);
+  let warning: string | null = null;
+  try {
+    await postToRoom(c.env, c.params.id, c.user!, { kind: 'text', body: `📝 โน้ตใหม่: ${firstLine}`, extra: { noteId: id } });
+  } catch (err) {
+    console.error('แจ้งโน้ตใหม่ในห้องไม่สำเร็จ', err);
+    warning = `บันทึกโน้ตแล้ว แต่แจ้งในห้องไม่สำเร็จ: ${err instanceof ApiError ? err.message : 'ระบบขัดข้อง'}`;
+  }
+  return ok({ noteId: id, warning }, 201);
+}
+
+/** โหลดโน้ต + ตรวจว่าเป็นสมาชิกห้องของโน้ต · canManage = ผู้เขียน หรือเจ้าของ/แอดมินห้อง */
+async function loadNote(c: Ctx) {
+  const n = await db('อ่านโน้ต', () =>
+    c.env.DB.prepare(`${NOTE_SELECT} WHERE n.id = ?`).bind(c.params.noteId).first<NoteRow>(),
+  );
+  if (!n) throw new ApiError(404, 'NOTE_NOT_FOUND', 'ไม่พบโน้ตนี้ (อาจถูกลบแล้ว)');
+  const { role } = await requireMember(c.env, n.room_id, c.user!.id);
+  const roomAdmin = role === 'owner' || role === 'admin';
+  return { note: n, roomAdmin, canManage: n.author_id === c.user!.id || roomAdmin };
+}
+
+async function getNote(c: Ctx) {
+  const { note, roomAdmin, canManage } = await loadNote(c);
+  const comments = await db('อ่านคอมเมนต์', () =>
+    c.env.DB.prepare(
+      `SELECT k.id, k.author_id, u.display_name AS author_name, u.picture_url AS author_picture, k.body, k.created_at
+       FROM note_comments k JOIN users u ON u.id = k.author_id WHERE k.note_id = ? ORDER BY k.created_at`,
+    ).bind(note.id).all<{ id: string; author_id: string; author_name: string; author_picture: string | null; body: string; created_at: string }>(),
+  );
+  return ok({
+    note: { ...noteOut(note), canManage },
+    comments: comments.results.map((k) => ({
+      id: k.id, authorId: k.author_id, authorName: k.author_name, authorPicture: k.author_picture, body: k.body, createdAt: k.created_at,
+      canDelete: k.author_id === c.user!.id || roomAdmin,
+    })),
+  });
+}
+
+async function updateNote(c: Ctx) {
+  const { note, canManage } = await loadNote(c);
+  if (!canManage) throw new ApiError(403, 'NOT_NOTE_OWNER', 'แก้ได้เฉพาะผู้เขียนโน้ต หรือเจ้าของ/แอดมินห้อง');
+  const body = await readJson<{ body?: unknown }>(c.req);
+  const text = noteText(body.body, NOTE_MAX, 'โน้ต');
+  await db('แก้โน้ต', () =>
+    c.env.DB.prepare(`UPDATE room_notes SET body = ?, updated_at = ? WHERE id = ?`).bind(text, nowThai(), note.id).run(),
+  );
+  return ok({ updated: true });
+}
+
+async function deleteNote(c: Ctx) {
+  const { note, canManage } = await loadNote(c);
+  if (!canManage) throw new ApiError(403, 'NOT_NOTE_OWNER', 'ลบได้เฉพาะผู้เขียนโน้ต หรือเจ้าของ/แอดมินห้อง');
+  await db('ลบโน้ต', () => c.env.DB.prepare(`DELETE FROM room_notes WHERE id = ?`).bind(note.id).run());
+  return ok({ deleted: true });
+}
+
+async function addNoteComment(c: Ctx) {
+  const { note } = await loadNote(c);
+  const body = await readJson<{ body?: unknown }>(c.req);
+  const text = noteText(body.body, COMMENT_MAX, 'คอมเมนต์');
+  const id = newId();
+  await db('บันทึกคอมเมนต์', () =>
+    c.env.DB.prepare(`INSERT INTO note_comments (id, note_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .bind(id, note.id, c.user!.id, text, nowThai()).run(),
+  );
+  return ok({ commentId: id }, 201);
+}
+
+async function deleteNoteComment(c: Ctx) {
+  const k = await db('อ่านคอมเมนต์', () =>
+    c.env.DB.prepare(`SELECT k.author_id, n.room_id FROM note_comments k JOIN room_notes n ON n.id = k.note_id WHERE k.id = ?`)
+      .bind(c.params.commentId).first<{ author_id: string; room_id: string }>(),
+  );
+  if (!k) throw new ApiError(404, 'COMMENT_NOT_FOUND', 'ไม่พบคอมเมนต์นี้');
+  const { role } = await requireMember(c.env, k.room_id, c.user!.id);
+  if (k.author_id !== c.user!.id && role !== 'owner' && role !== 'admin') {
+    throw new ApiError(403, 'NOT_COMMENT_OWNER', 'ลบได้เฉพาะผู้เขียนคอมเมนต์ หรือเจ้าของ/แอดมินห้อง');
+  }
+  await db('ลบคอมเมนต์', () => c.env.DB.prepare(`DELETE FROM note_comments WHERE id = ?`).bind(c.params.commentId).run());
+  return ok({ deleted: true });
+}
+
+async function listMyNotes(c: Ctx) {
+  const rows = await db('อ่านโน้ตส่วนตัว', () =>
+    c.env.DB.prepare(`SELECT id, body, created_at, updated_at FROM user_notes WHERE user_id = ? ORDER BY updated_at DESC LIMIT 500`)
+      .bind(c.user!.id).all<{ id: string; body: string; created_at: string; updated_at: string }>(),
+  );
+  return ok({ notes: rows.results.map((n) => ({ id: n.id, body: n.body, createdAt: n.created_at, updatedAt: n.updated_at })) });
+}
+
+async function createMyNote(c: Ctx) {
+  const body = await readJson<{ body?: unknown }>(c.req);
+  const text = noteText(body.body, MY_NOTE_MAX, 'โน้ต');
+  const id = newId();
+  const now = nowThai();
+  await db('บันทึกโน้ตส่วนตัว', () =>
+    c.env.DB.prepare(`INSERT INTO user_notes (id, user_id, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`)
+      .bind(id, c.user!.id, text, now, now).run(),
+  );
+  return ok({ noteId: id }, 201);
+}
+
+async function updateMyNote(c: Ctx) {
+  const body = await readJson<{ body?: unknown }>(c.req);
+  const text = noteText(body.body, MY_NOTE_MAX, 'โน้ต');
+  const r = await db('แก้โน้ตส่วนตัว', () =>
+    c.env.DB.prepare(`UPDATE user_notes SET body = ?, updated_at = ? WHERE id = ? AND user_id = ?`)
+      .bind(text, nowThai(), c.params.noteId, c.user!.id).run(),
+  );
+  if (r.meta.changes !== 1) throw new ApiError(404, 'NOTE_NOT_FOUND', 'ไม่พบโน้ตนี้ (อาจถูกลบแล้ว)');
+  return ok({ updated: true });
+}
+
+async function deleteMyNote(c: Ctx) {
+  const r = await db('ลบโน้ตส่วนตัว', () =>
+    c.env.DB.prepare(`DELETE FROM user_notes WHERE id = ? AND user_id = ?`).bind(c.params.noteId, c.user!.id).run(),
+  );
+  if (r.meta.changes !== 1) throw new ApiError(404, 'NOTE_NOT_FOUND', 'ไม่พบโน้ตนี้ (อาจถูกลบแล้ว)');
+  return ok({ deleted: true });
+}
+
 // =====================================================================
 /** ชาเนล: โพสต์ได้เฉพาะเจ้าของ/แอดมินชาเนล (ห้องอื่นสมาชิกทุกคนโพสต์ได้) */
 function requirePoster(type: string, role: string) {

@@ -1,9 +1,10 @@
 // =====================================================================
 // NewChatPage.tsx — เริ่มแชท: เลือก 1 คน = แชท 1:1 · เลือกหลายคน + ตั้งชื่อ = กลุ่ม
+// เฟส 5: แสดงเฉพาะคนที่คุยได้ (เพื่อน + แอดมินระบบ + บอท) · คนอื่นไปเพิ่มเพื่อนที่หน้า "เพื่อน"
 // =====================================================================
 
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router';
+import { Link, useNavigate } from 'react-router';
 import { User, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 
@@ -19,7 +20,7 @@ export default function NewChatPage() {
 
   useEffect(() => {
     api.get<{ users: User[] }>('/api/users')
-      .then((d) => setUsers(d.users))
+      .then((d) => setUsers(d.users.filter((u) => u.canChat)))
       .catch((e) => setLoadError(`โหลดรายชื่อไม่สำเร็จ: ${errMsg(e)}`));
   }, []);
 
@@ -65,7 +66,8 @@ export default function NewChatPage() {
       </div>
       {loadError && <div className="banner banner-error" role="alert">{loadError}</div>}
       {users === null && !loadError && <p className="center muted">กำลังโหลด…</p>}
-      {users?.length === 0 && <p className="center muted">ยังไม่มีผู้ใช้อื่นที่ได้รับอนุมัติ</p>}
+      {users?.length === 0 && <p className="center muted">ยังไม่มีเพื่อน — <Link to="/friends">เพิ่มเพื่อน</Link> ก่อนเริ่มแชท</p>}
+      {(users?.length ?? 0) > 0 && <p className="small muted" style={{ padding: '0 14px' }}>แสดงเฉพาะเพื่อน แอดมิน และบอท · ไม่เจอชื่อ? <Link to="/friends">เพิ่มเพื่อน</Link></p>}
       <ul className="user-list">
         {shown.map((u) => (
           <li key={u.id}>

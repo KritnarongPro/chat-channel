@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0006_notifications.sql
+-- ล่าสุดถึง: 0007_phase5.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -191,3 +191,79 @@ CREATE TABLE notify_settings (
   mentions_when_muted  INTEGER NOT NULL DEFAULT 1,
   updated_at           TEXT NOT NULL
 );
+
+-- =====================================================================
+-- 0007: เฟส 5 (ธีม/ตัวอักษร · เพื่อน · สติกเกอร์ · โน้ต)
+-- =====================================================================
+-- ---------- ค่าที่ผู้ใช้เลือก (จำต่อบัญชี ใช้ได้ทุกเครื่อง) ----------
+CREATE TABLE user_prefs (
+  user_id     TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  theme       TEXT NOT NULL DEFAULT 'system' CHECK (theme IN ('system', 'light', 'dark')),
+  font_level  INTEGER NOT NULL DEFAULT 3 CHECK (font_level BETWEEN 1 AND 5),
+  updated_at  TEXT NOT NULL
+);
+
+-- ---------- เพื่อน: 1 แถวต่อคู่ (user_low < user_high) ----------
+-- status: pending = รออีกฝ่ายกดยอมรับ (requested_by = คนส่งคำขอ) · accepted = เป็นเพื่อนกันแล้ว
+-- ปฏิเสธ / ยกเลิกคำขอ / เลิกเป็นเพื่อน = ลบแถว
+CREATE TABLE friendships (
+  user_low      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  user_high     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status        TEXT NOT NULL CHECK (status IN ('pending', 'accepted')),
+  requested_by  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at    TEXT NOT NULL,
+  accepted_at   TEXT,
+  PRIMARY KEY (user_low, user_high),
+  CHECK (user_low < user_high)
+);
+CREATE INDEX idx_friendships_high ON friendships(user_high);
+
+-- ---------- สติกเกอร์ (แอดมินระบบเพิ่ม · ตัวภาพอยู่ใน R2 ไม่มีวันหมดอายุ) ----------
+CREATE TABLE sticker_packs (
+  id          TEXT PRIMARY KEY,
+  name        TEXT NOT NULL,
+  active      INTEGER NOT NULL DEFAULT 1,
+  sort        INTEGER NOT NULL DEFAULT 0,
+  created_by  TEXT NOT NULL REFERENCES users(id),
+  created_at  TEXT NOT NULL
+);
+CREATE TABLE stickers (
+  id          TEXT PRIMARY KEY,
+  pack_id     TEXT NOT NULL REFERENCES sticker_packs(id) ON DELETE CASCADE,
+  r2_key      TEXT NOT NULL UNIQUE,
+  mime        TEXT NOT NULL,
+  size        INTEGER NOT NULL,
+  sort        INTEGER NOT NULL DEFAULT 0,
+  active      INTEGER NOT NULL DEFAULT 1,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX idx_stickers_pack ON stickers(pack_id, sort);
+
+-- ---------- โน้ตในห้อง (แบบ LINE: สมาชิกทุกคนเห็น + คอมเมนต์ได้) ----------
+CREATE TABLE room_notes (
+  id          TEXT PRIMARY KEY,
+  room_id     TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  author_id   TEXT NOT NULL REFERENCES users(id),
+  body        TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX idx_room_notes_room ON room_notes(room_id, created_at);
+CREATE TABLE note_comments (
+  id          TEXT PRIMARY KEY,
+  note_id     TEXT NOT NULL REFERENCES room_notes(id) ON DELETE CASCADE,
+  author_id   TEXT NOT NULL REFERENCES users(id),
+  body        TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX idx_note_comments_note ON note_comments(note_id, created_at);
+
+-- ---------- โน้ตส่วนตัว (เห็นคนเดียว) ----------
+CREATE TABLE user_notes (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  body        TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX idx_user_notes_user ON user_notes(user_id, updated_at);

@@ -11,9 +11,12 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown, raw?: { blob: Blob; mime: string }): Promise<T> {
   const init: RequestInit = { method, credentials: 'same-origin', headers: {} };
-  if (body !== undefined) {
+  if (raw) {
+    init.body = raw.blob;
+    (init.headers as Record<string, string>)['content-type'] = raw.mime;
+  } else if (body !== undefined) {
     init.body = JSON.stringify(body);
     (init.headers as Record<string, string>)['content-type'] = 'application/json';
   }
@@ -39,6 +42,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 export const api = {
   get: <T>(path: string) => request<T>('GET', path),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body ?? {}),
+  /** ส่งไฟล์ดิบ (เช่นภาพสติกเกอร์) — body = ตัวไฟล์ · Content-Type = ชนิดไฟล์ */
+  raw: <T>(path: string, blob: Blob, mime: string) => request<T>('POST', path, undefined, { blob, mime }),
 };
 
 /**
@@ -92,6 +97,8 @@ export interface User {
   status: 'pending' | 'active' | 'blocked';
   role: 'member' | 'admin';
   isBot: boolean;   // เฟส 4
+  friend?: 'friend' | 'incoming' | 'outgoing' | 'none';  // เฟส 5: มีเฉพาะใน /api/users
+  canChat?: boolean;                                      // เฟส 5: ทักแชท/เพิ่มเข้ากลุ่มได้เลย (เพื่อน หรือ แอดมิน/บอท)
 }
 
 export interface Me { user: User; appName: string; hasAdmin: boolean }
@@ -158,3 +165,19 @@ export const LOGIN_ERRORS: Record<string, string> = {
   DB_FAILED: 'บันทึกข้อมูลผู้ใช้ไม่สำเร็จ กรุณาลองใหม่',
   SESSION_FAILED: 'สร้างการเข้าสู่ระบบไม่สำเร็จ กรุณาลองใหม่',
 };
+
+// ---------------------------------------------------------------------
+// เฟส 5: เพื่อน · สติกเกอร์ · โน้ต · หน้าตาแอป
+// ---------------------------------------------------------------------
+export interface FriendUser { id: string; displayName: string; pictureUrl: string | null; since: string }
+export interface FriendsData { friends: FriendUser[]; incoming: FriendUser[]; outgoing: FriendUser[] }
+export interface StickerPack { id: string; name: string; active: boolean; stickers: { id: string; active: boolean; size: number }[] }
+export interface RoomNote {
+  id: string; roomId: string; authorId: string; authorName: string; authorPicture: string | null;
+  body: string; createdAt: string; updatedAt: string; comments: number; canManage?: boolean;
+}
+export interface NoteComment {
+  id: string; authorId: string; authorName: string; authorPicture: string | null; body: string; createdAt: string; canDelete: boolean;
+}
+export interface MyNote { id: string; body: string; createdAt: string; updatedAt: string }
+export const stickerUrl = (id: string) => `/api/stickers/${encodeURIComponent(id)}/image`;

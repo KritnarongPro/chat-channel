@@ -1,12 +1,13 @@
 // =====================================================================
 // ChatListPage.tsx — รายการแชท (เรียงตามข้อความล่าสุด + ตัวเลขยังไม่อ่าน)
 // อัปเดตทุก 15 วินาที, ทุกครั้งที่กลับมาที่แอป และทันทีที่มีข้อความใหม่ (event 'chat-activity' จาก InAppNotifier)
+// เฟส 5: ปุ่ม 👥 เพื่อน (ตัวเลข = คำขอรอยอมรับ) + เมนู ☰ รวม โน้ต / หน้าตาแอป / แจ้งเตือน / ออเดอร์ / แอดมิน / ออก
 // =====================================================================
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { thaiShort } from '../../shared/time';
-import { Room, api, errMsg } from '../api';
+import { FriendsData, Room, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import SetupCard from '../SetupCard';
@@ -18,8 +19,14 @@ export default function ChatListPage() {
   const { me, logout } = useMe();
   const [rooms, setRooms] = useState<Room[] | null>(null);
   const [error, setError] = useState('');
+  const [friendReqs, setFriendReqs] = useState(0);
+  const [menu, setMenu] = useState(false);
 
   const load = useCallback(async () => {
+    // คำขอเป็นเพื่อนที่รอยอมรับ · โหลดไม่สำเร็จ → ปุ่มเพื่อนขึ้น "!" (เปิดหน้าเพื่อนจะเห็นเหตุผล) ไม่บังหน้ารายการแชท
+    api.get<FriendsData>('/api/friends')
+      .then((f) => setFriendReqs(f.incoming.length))
+      .catch((e) => { console.warn('โหลดคำขอเป็นเพื่อนไม่สำเร็จ', e); setFriendReqs(-1); });
     try {
       const data = await api.get<{ rooms: Room[] }>('/api/rooms');
       setRooms(data.rooms);
@@ -52,10 +59,11 @@ export default function ChatListPage() {
         right={
           <>
             <Link to="/channels" className="btn btn-small btn-ghost">ชาเนล</Link>
-            <Link to="/orders" className="btn btn-small btn-ghost" aria-label="ออเดอร์">📦</Link>
-            <Link to="/settings" className="btn btn-small btn-ghost" aria-label="ตั้งค่าแจ้งเตือน">🔔</Link>
-            {me.user.role === 'admin' && <Link to="/admin" className="btn btn-small btn-ghost">แอดมิน</Link>}
-            <button className="btn btn-small btn-ghost" onClick={() => void logout()}>ออก</button>
+            <Link to="/friends" className="btn btn-small btn-ghost icon-badge"
+              aria-label={friendReqs < 0 ? 'เพื่อน (โหลดคำขอไม่สำเร็จ)' : `เพื่อน${friendReqs ? ` (คำขอ ${friendReqs})` : ''}`}>
+              👥{friendReqs !== 0 && <span className="badge">{friendReqs < 0 ? '!' : friendReqs}</span>}
+            </Link>
+            <button className="btn btn-small btn-ghost" onClick={() => setMenu(true)} aria-label="เมนู">☰</button>
           </>
         }
       />
@@ -91,6 +99,22 @@ export default function ChatListPage() {
         ))}
       </ul>
       <Link to="/new" className="fab" aria-label="เริ่มแชทใหม่">+</Link>
+      {menu && (
+        <div className="sheet-backdrop" onClick={() => setMenu(false)}>
+          <div className="sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-head"><b>{me.user.displayName}</b><button className="link" onClick={() => setMenu(false)}>ปิด</button></div>
+            <ul className="menu-list">
+              <li><Link to="/friends">👥 เพื่อน{friendReqs > 0 ? ` · คำขอ ${friendReqs}` : ''}</Link></li>
+              <li><Link to="/notes">🗒 โน้ตของฉัน</Link></li>
+              <li><Link to="/appearance">🎨 หน้าตาแอป (ธีม / ตัวอักษร)</Link></li>
+              <li><Link to="/settings">🔔 ตั้งค่าแจ้งเตือน</Link></li>
+              <li><Link to="/orders">📦 ออเดอร์</Link></li>
+              {me.user.role === 'admin' && <li><Link to="/admin">🛠 แอดมิน</Link></li>}
+              <li><button onClick={() => void logout()}>🚪 ออกจากระบบ</button></li>
+            </ul>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

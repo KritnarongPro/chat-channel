@@ -161,10 +161,39 @@ for (const f of [join('worker', 'index.ts'), join('worker', 'push.ts')]) {
   });
 }
 
+// ---------- CORE-06 SQL: ห้ามผสมพารามิเตอร์แบบมีเลข (?1, ?2) กับแบบไม่มีเลข (?) ในคำสั่งเดียว ----------
+// SQLite: "?" ตัวถัดจาก ?2 จะได้เลข 3 ต่อไปเรื่อย ๆ → ค่าที่ bind ไปผิดช่องแบบไม่มี error (เจอ 2026-11-12 ตอนทำระบบเพื่อน)
+for (const f of walk('worker', ['.ts'])) {
+  const src = read(f);
+  for (const m of src.matchAll(/prepare\(\s*`([\s\S]*?)`/g)) {
+    const sql = m[1];
+    const numbered = /\?\d/.test(sql);
+    // ? เปล่าในตัวคำสั่ง หรือ ${…} ที่สร้างจาก map(() => '?') ไม่เกิน 800 ตัวอักษรก่อน prepare
+    const plain = /\?(?!\d)/.test(sql.replace(/\$\{[^}]*\}/g, ''))
+      || (/\$\{/.test(sql) && /=>\s*'\?'/.test(src.slice(Math.max(0, m.index - 800), m.index)));
+    if (numbered && plain) {
+      const line = src.slice(0, m.index).split('\n').length;
+      fail('CORE-06', `${f}:${line} คำสั่ง SQL ใช้ทั้ง ?เลข และ ? เปล่า — ใช้แบบมีเลขทั้งหมด (เช่น สร้าง IN (?3, ?4, …))`);
+    }
+  }
+}
+
+// ---------- BUGS-13 เพื่อน: ตรวจ "แชท 1:1 ได้เฉพาะเพื่อน" ทั้งตอนเปิดห้องและตอนส่งทุกข้อความ ----------
+{
+  const idx = read(join('worker', 'index.ts'));
+  const open = idx.slice(idx.indexOf('async function openDm'), idx.indexOf('async function createGroup'));
+  if (!/contactableIds\(/.test(open)) fail('BUGS-13', 'worker/index.ts openDm ต้องเรียก contactableIds() ก่อนเปิด/สร้างแชท 1:1');
+  const pStart = room.indexOf('private async checkPoster');
+  const poster = room.slice(pStart, room.indexOf('private async claimFile', pStart));
+  if (!/DM_ALLOWED_SQL/.test(poster) || !/NOT_FRIEND/.test(poster)) {
+    fail('BUGS-13', 'worker/room.ts checkPoster ต้องใช้ DM_ALLOWED_SQL และตอบ NOT_FRIEND (เลิกเป็นเพื่อนแล้วต้องส่งในห้องเดิมไม่ได้)');
+  }
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..05, BUGS-01..12)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..06, BUGS-01..13)');

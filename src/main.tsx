@@ -24,7 +24,27 @@ import FormFillPage from './pages/FormFillPage';
 import OrdersPage from './pages/OrdersPage';
 import JoinPage from './pages/JoinPage';
 import InAppNotifier from './InAppNotifier';
+import AppearancePage from './pages/AppearancePage';
+import FriendsPage from './pages/FriendsPage';
+import AddFriendPage from './pages/AddFriendPage';
+import MyNotesPage from './pages/MyNotesPage';
+import RoomNotesPage from './pages/RoomNotesPage';
+import NotePage from './pages/NotePage';
+import AdminStickersPage from './pages/AdminStickersPage';
+import { applyPrefs, cachedPrefs, Prefs } from './prefs';
+import { useNotify } from './notice';
 import './styles.css';
+
+/** เฟส 5: โหลดธีม/ขนาดตัวอักษรจากบัญชี (ค่าในเครื่องใส่ไว้แล้วตอนเปิดแอป) — โหลดไม่ได้แจ้งเตือน ไม่ข้ามเงียบ */
+function PrefsLoader() {
+  const notify = useNotify();
+  useEffect(() => {
+    api.get<{ prefs: Prefs }>('/api/me/prefs')
+      .then((d) => applyPrefs(d.prefs))
+      .catch((e) => notify('warning', `โหลดธีม/ขนาดตัวอักษรจากบัญชีไม่สำเร็จ ใช้ค่าในเครื่องแทน: ${errMsg(e)}`));
+  }, [notify]);
+  return null;
+}
 
 function App() {
   const [me, setMe] = useState<Me | null>(null);
@@ -88,6 +108,7 @@ function App() {
       ) : (
         <>
         <InAppNotifier />
+        <PrefsLoader />
         <Routes>
           <Route index element={<ChatListPage />} />
           <Route path="new" element={<NewChatPage />} />
@@ -96,6 +117,13 @@ function App() {
           <Route path="settings" element={<SettingsPage />} />
           <Route path="form/:formId" element={<FormFillPage />} />
           <Route path="orders" element={<OrdersPage />} />
+          <Route path="appearance" element={<AppearancePage />} />
+          <Route path="friends" element={<FriendsPage />} />
+          <Route path="add/:userId" element={<AddFriendPage />} />
+          <Route path="notes" element={<MyNotesPage />} />
+          <Route path="room/:id/notes" element={<RoomNotesPage />} />
+          <Route path="note/:noteId" element={<NotePage />} />
+          <Route path="admin/stickers" element={me.user.role === 'admin' ? <AdminStickersPage /> : <Navigate to="/" replace />} />
           <Route path="admin/bots" element={me.user.role === 'admin' ? <AdminBotsPage /> : <Navigate to="/" replace />} />
           <Route path="admin/forms" element={me.user.role === 'admin' ? <AdminFormsPage /> : <Navigate to="/" replace />} />
           <Route path="admin" element={me.user.role === 'admin' ? <AdminPage /> : <Navigate to="/" replace />} />
@@ -109,6 +137,8 @@ function App() {
 
 // ติดตั้งแอป + แจ้งเตือน: ต้องดักเหตุการณ์ติดตั้งตั้งแต่เปิดหน้า
 initPwa();
+// เฟส 5: ใส่ธีม/ขนาดตัวอักษรที่จำไว้ในเครื่องก่อนวาดหน้า (กันจอกระพริบสี) แล้วค่อยโหลดค่าจริงจากบัญชี
+applyPrefs(cachedPrefs());
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
