@@ -17,13 +17,13 @@ import {
   ChatMessage, ClientFrame, MessageExtra, ServerFrame,
   HISTORY_LIMIT, MAX_MESSAGE_CHARS, SYNC_LIMIT,
 } from '../shared/protocol';
-import type { Env } from './lib';
+import { DM_ALLOWED_SQL, type Env } from './lib';
 import type { PushJob } from './push';
 
 // =====================================================================
 // 0. โครงตารางในห้อง — ต้องตรงกับ do-schema.sql (check:rules ตรวจเลขเวอร์ชัน)
 // =====================================================================
-export const DO_SCHEMA_VERSION = 3;
+export const DO_SCHEMA_VERSION = 4;
 
 const DO_MIGRATIONS: Record<number, string[]> = {
   1: [
@@ -89,6 +89,33 @@ const DO_MIGRATIONS: Record<number, string[]> = {
     `DROP TABLE messages`,
     `ALTER TABLE messages_v3 RENAME TO messages`,
   ],
+  // v4 (เฟส 5): เพิ่มชนิด sticker (รหัสสติกเกอร์อยู่ใน extra.stickerId) — สร้างตารางใหม่แล้วย้ายข้อมูลเหมือน v2/v3
+  4: [
+    `CREATE TABLE messages_v4 (
+       seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+       id              TEXT NOT NULL UNIQUE,
+       sender_id       TEXT NOT NULL,
+       sender_name     TEXT NOT NULL,
+       kind            TEXT NOT NULL CHECK (kind IN ('text', 'image', 'file', 'voice', 'form', 'sticker')),
+       body            TEXT NOT NULL,
+       created_at      TEXT NOT NULL,
+       file_id         TEXT,
+       file_name       TEXT,
+       file_mime       TEXT,
+       file_size       INTEGER,
+       file_width      INTEGER,
+       file_height     INTEGER,
+       file_duration_ms INTEGER,
+       file_expires_at TEXT,
+       extra           TEXT
+     )`,
+    `INSERT INTO messages_v4 (seq, id, sender_id, sender_name, kind, body, created_at, file_id, file_name, file_mime,
+                              file_size, file_width, file_height, file_duration_ms, file_expires_at, extra)
+       SELECT seq, id, sender_id, sender_name, kind, body, created_at, file_id, file_name, file_mime,
+              file_size, file_width, file_height, file_duration_ms, file_expires_at, extra FROM messages`,
+    `DROP TABLE messages`,
+    `ALTER TABLE messages_v4 RENAME TO messages`,
+  ],
 };
 
 type MsgRow = {
@@ -120,7 +147,7 @@ const msgOut = (r: MsgRow): ChatMessage => ({
 });
 
 /** ข้อความย่อสำหรับหน้ารายการแชท */
-const PREVIEW: Record<ChatMessage['kind'], string> = { text: '', image: '[รูปภาพ]', file: '[ไฟล์]', voice: '[ข้อความเสียง]', form: '[ฟอร์ม]' };
+const PREVIEW: Record<ChatMessage['kind'], string> = { text: '', image: '[รูปภาพ]', file: '[ไฟล์]', voice: '[ข้อความเสียง]', form: '[ฟอร์ม]', sticker: '[สติกเกอร์]' };
 function previewOf(m: ChatMessage): string {
   if (m.kind === 'text') return m.body.slice(0, 120);
   if (m.kind === 'form') return `[ฟอร์ม] ${m.extra?.formTitle ?? ''}`.slice(0, 120);
@@ -129,6 +156,8 @@ function previewOf(m: ChatMessage): string {
 }
 
 interface RoomInfo { type: 'dm' | 'group' | 'channel'; title: string | null; senderIsBot: boolean; senderSysRole: string | null }
+
+const MSG_KINDS = ['text', 'image', 'file', 'voice', 'form', 'sticker'] as const;
 
 type FileRow = {
   id: string; room_id: string; uploader_id: string; kind: 'image' | 'file' | 'voice'; mime: string; name: string;
@@ -357,7 +386,7 @@ export class ChatRoom extends DurableObject<Env> {
       out({ type: 'error', code: 'BAD_CLIENT_ID', message: 'รหัสข้อความไม่ถูกต้อง' });
       return null;
     }
-    if (kind !== 'text' && kind !== 'image' && kind !== 'file' && kind !== 'voice' && kind !== 'form') {
+    if (typeof kind !== 'string' || !(MSG_KINDS as readonly string[]).includes(kind)) {
       out({ type: 'error', clientId, code: 'BAD_KIND', message: 'ชนิดข้อความไม่ถูกต้อง' });
       return null;
     }
@@ -375,6 +404,10 @@ export class ChatRoom extends DurableObject<Env> {
     }
     if (kind === 'form' && (typeof extra !== 'object' || extra === null || typeof (extra as MessageExtra).formId !== 'string')) {
       out({ type: 'error', clientId, code: 'NO_FORM', message: 'ไม่ได้ระบุฟอร์มที่จะส่ง' });
+      return null;
+    }
+    if (kind === 'sticker' && (typeof extra !== 'object' || extra === null || typeof (extra as MessageExtra).stickerId !== 'string')) {
+      out({ type: 'error', clientId, code: 'NO_STICKER', message: 'ไม่ได้ระบุสติกเกอร์ที่จะส่ง' });
       return null;
     }
     if ((kind === 'image' || kind === 'file' || kind === 'voice') && (typeof fileId !== 'string' || !fileId)) {
@@ -419,6 +452,24 @@ export class ChatRoom extends DurableObject<Env> {
       if (!form) { out({ type: 'error', clientId, code: 'FORM_NOT_FOUND', message: 'ไม่พบฟอร์มนี้' }); return null; }
       if (!form.active) { out({ type: 'error', clientId, code: 'FORM_INACTIVE', message: 'ฟอร์มนี้ปิดรับแล้ว' }); return null; }
       extraOut = { formId, formTitle: form.title };
+    } else if (kind === 'sticker') {
+      // ---------- สติกเกอร์ (เฟส 5): ต้องมีอยู่จริงและยังเปิดใช้ (ทั้งตัวสติกเกอร์และชุด) ----------
+      const stickerId = (extra as MessageExtra).stickerId!;
+      let st: { ok: number } | null;
+      try {
+        st = await this.env.DB.prepare(
+          `SELECT s.active AND p.active AS ok FROM stickers s JOIN sticker_packs p ON p.id = s.pack_id WHERE s.id = ?`,
+        ).bind(stickerId).first();
+      } catch (err) {
+        console.error('อ่านสติกเกอร์ไม่สำเร็จ', err);
+        out({ type: 'error', clientId, code: 'DB_FAILED', message: 'ตรวจสติกเกอร์ไม่สำเร็จ (ฐานข้อมูลขัดข้อง)' });
+        return null;
+      }
+      if (!st) { out({ type: 'error', clientId, code: 'STICKER_NOT_FOUND', message: 'ไม่พบสติกเกอร์นี้' }); return null; }
+      if (!st.ok) { out({ type: 'error', clientId, code: 'STICKER_INACTIVE', message: 'สติกเกอร์นี้ถูกปิดใช้แล้ว' }); return null; }
+      extraOut = { stickerId };
+    } else if (extra && typeof extra === 'object' && typeof (extra as MessageExtra).noteId === 'string') {
+      extraOut = { noteId: (extra as MessageExtra).noteId }; // ข้อความแจ้งโน้ตใหม่ (worker ใส่ให้หลังบันทึกโน้ตแล้ว)
     } else if (extra && typeof extra === 'object' && typeof (extra as MessageExtra).orderId === 'number') {
       extraOut = { orderId: (extra as MessageExtra).orderId }; // ข้อความแจ้งสถานะออเดอร์ (ระบบใส่ให้)
     }
@@ -476,10 +527,17 @@ export class ChatRoom extends DurableObject<Env> {
   /** อ่านชนิดห้อง + ตำแหน่งผู้ส่งจาก D1 ทุกครั้งที่ส่ง (คนที่ถูกเอาออก/ถูกถอดแอดมินระหว่างเปิดห้องค้างไว้จะส่งไม่ได้) */
   private async checkPoster(out: Reply, clientId: string, info: SocketInfo): Promise<RoomInfo | null> {
     const roomId = this.roomId;
-    let r: { type: RoomInfo['type']; title: string | null; role: string | null; is_bot: number | null; sys_role: string | null } | null;
+    let r: {
+      type: RoomInfo['type']; title: string | null; role: string | null; is_bot: number | null; sys_role: string | null;
+      dm_ok: number | null;
+    } | null;
     try {
+      // dm_ok (เฟส 5): แชท 1:1 ส่งได้เมื่อเป็นเพื่อนกัน หรือฝั่งใดฝั่งหนึ่งเป็นแอดมินระบบ/บอท (ข้อยกเว้นที่ผู้ใช้เลือก)
       r = await this.env.DB.prepare(
-        `SELECT r.type, r.title, m.role, u.is_bot, u.role AS sys_role
+        `SELECT r.type, r.title, m.role, u.is_bot, u.role AS sys_role,
+                (SELECT ${DM_ALLOWED_SQL}
+                   FROM room_members pm JOIN users p ON p.id = pm.user_id
+                   WHERE pm.room_id = r.id AND pm.user_id <> ?1 LIMIT 1) AS dm_ok
          FROM rooms r LEFT JOIN room_members m ON m.room_id = r.id AND m.user_id = ?1
          LEFT JOIN users u ON u.id = ?1
          WHERE r.id = ?2`,
@@ -499,6 +557,10 @@ export class ChatRoom extends DurableObject<Env> {
     }
     if (r.type === 'channel' && r.role !== 'owner' && r.role !== 'admin') {
       out({ type: 'error', clientId, code: 'NOT_CHANNEL_ADMIN', message: 'ชาเนลนี้โพสต์ได้เฉพาะเจ้าของและแอดมินชาเนล' });
+      return null;
+    }
+    if (r.type === 'dm' && !r.dm_ok) {
+      out({ type: 'error', clientId, code: 'NOT_FRIEND', message: 'ส่งไม่ได้: คุณกับอีกฝ่ายยังไม่ได้เป็นเพื่อนกัน (หรือเลิกเป็นเพื่อนแล้ว) — ส่งคำขอเป็นเพื่อนที่หน้า "เพื่อน" ก่อน' });
       return null;
     }
     return { type: r.type, title: r.title, senderIsBot: r.is_bot === 1, senderSysRole: r.sys_role };
@@ -631,6 +693,7 @@ export class ChatRoom extends DurableObject<Env> {
       : m.kind === 'image' ? `[รูปภาพ]${m.body ? ' ' + m.body : ''}`
       : m.kind === 'voice' ? '[ข้อความเสียง]'
       : m.kind === 'form' ? `[ฟอร์ม] ${m.extra?.formTitle ?? ''}`
+      : m.kind === 'sticker' ? '[สติกเกอร์]'
       : `[ไฟล์] ${m.file?.name ?? ''}`;
     const title = room.type === 'dm' ? m.senderName : (room.title ?? (room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม'));
     const body = (room.type === 'group' ? `${m.senderName}: ${text}` : text).slice(0, 200);

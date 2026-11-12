@@ -173,3 +173,40 @@ export async function requireBot(req: Request, env: Env): Promise<User> {
   if (!row.enabled) throw new ApiError(403, 'BOT_DISABLED', 'บอทนี้ถูกปิดใช้งานอยู่');
   return userOut(row);
 }
+
+// =====================================================================
+// 5. เพื่อน (เฟส 5) — สิทธิ์ทักแชท 1:1 / เพิ่มเข้ากลุ่ม ตรวจที่นี่ที่เดียว
+//    ทักได้เมื่อ: เป็นเพื่อนกันแล้ว (accepted) หรือฝั่งใดฝั่งหนึ่งเป็นแอดมินระบบ / บอท (ข้อยกเว้นที่ผู้ใช้เลือก)
+// =====================================================================
+/** คู่ไอดีเรียงแล้ว (ตรงกับ friendships.user_low / user_high) */
+export function friendPair(a: string, b: string): [string, string] {
+  return a < b ? [a, b] : [b, a];
+}
+
+/** นิพจน์ SQL ใช้ในห้องแชท (room.ts): ?1 = ผู้ส่ง, u = แถวผู้ส่ง, p = แถวอีกฝ่าย → 1 = ส่งได้ */
+export const DM_ALLOWED_SQL = `CASE WHEN u.is_bot = 1 OR u.role = 'admin' OR p.is_bot = 1 OR p.role = 'admin'
+  OR EXISTS (SELECT 1 FROM friendships f WHERE f.status = 'accepted'
+             AND f.user_low = MIN(?1, p.id) AND f.user_high = MAX(?1, p.id)) THEN 1 ELSE 0 END`;
+
+/** ไอดีไหนบ้างใน ids ที่ me ติดต่อได้ (เป็นเพื่อน / เป็นบอท / me หรือเขาเป็นแอดมินระบบ) */
+export async function contactableIds(env: Env, me: User, ids: string[]): Promise<Set<string>> {
+  const okIds = new Set<string>();
+  if (ids.length === 0) return okIds;
+  const meExempt = me.role === 'admin' || me.isBot ? 1 : 0;
+  for (let i = 0; i < ids.length; i += 90) {
+    const part = ids.slice(i, i + 90);
+    // ?1 = me.id · ?2 = ข้อยกเว้นของ me (แอดมิน/บอท) · ?3.. = ไอดีที่ตรวจ
+    const inList = part.map((_, k) => `?${k + 3}`).join(',');
+    const rows = await db('ตรวจรายชื่อเพื่อน', () =>
+      env.DB.prepare(
+        `SELECT p.id FROM users p
+         WHERE p.id IN (${inList})
+           AND (?2 = 1 OR p.is_bot = 1 OR p.role = 'admin'
+                OR EXISTS (SELECT 1 FROM friendships f WHERE f.status = 'accepted'
+                           AND f.user_low = MIN(?1, p.id) AND f.user_high = MAX(?1, p.id)))`,
+      ).bind(me.id, meExempt, ...part).all<{ id: string }>(),
+    );
+    for (const r of rows.results) okIds.add(r.id);
+  }
+  return okIds;
+}

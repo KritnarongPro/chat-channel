@@ -30,9 +30,9 @@ export interface OutgoingFile {
 
 export interface PendingMessage {
   clientId: string;
-  kind: 'text' | FileKind | 'form';
+  kind: 'text' | FileKind | 'form' | 'sticker';
   body: string;
-  extra?: MessageExtra;   // เฟส 4: การ์ดฟอร์ม { formId }
+  extra?: MessageExtra;   // เฟส 4: การ์ดฟอร์ม { formId } · เฟส 5: สติกเกอร์ { stickerId }
   status: 'uploading' | 'sending' | 'failed';
   reason?: string;
   progress?: number;
@@ -158,7 +158,7 @@ export function useRoomSocket(
         initialSyncRef.current = lastSeqRef.current === 0;
         ws.send(JSON.stringify({ type: 'sync', afterSeq: lastSeqRef.current } satisfies ClientFrame));
         // ข้อความที่ค้าง "กำลังส่ง" ตอนเน็ตหลุด → ส่งอีกรอบ (รหัสเดิม ไม่ซ้ำ)
-        for (const p of pendingRef.current) if (p.status === 'sending' && (p.kind === 'text' || p.kind === 'form' || p.fileId)) transmit(p);
+        for (const p of pendingRef.current) if (p.status === 'sending' && (p.kind === 'text' || p.kind === 'form' || p.kind === 'sticker' || p.fileId)) transmit(p);
         pingTimer = window.setInterval(() => rawSend({ type: 'ping' }), PING_MS);
       };
 
@@ -281,11 +281,20 @@ export function useRoomSocket(
     transmit(p);
   }, [transmit]);
 
+  /** เฟส 5: ส่งสติกเกอร์ (ห้องตรวจว่าสติกเกอร์มีอยู่และเปิดใช้ ไม่ผ่าน → ส่งไม่สำเร็จ + เหตุผล) */
+  const sendSticker = useCallback((stickerId: string, extra?: MessageExtra) => {
+    const p: PendingMessage = {
+      clientId: makeClientId(), kind: 'sticker', body: '', status: 'sending', extra: { ...extra, stickerId },
+    };
+    setPending((ps) => [...ps, p]);
+    transmit(p);
+  }, [transmit]);
+
   const retry = useCallback((clientId: string) => {
     const p = pendingRef.current.find((x) => x.clientId === clientId);
     if (!p) return;
     // ไฟล์ที่ยังอัปไม่ผ่าน → อัปใหม่ · อัปแล้ว/ข้อความ → ส่งผ่านห้องอีกรอบ (รหัสเดิม ไม่ซ้ำ)
-    if (p.kind !== 'text' && p.kind !== 'form' && !p.fileId) { void upload(p); return; }
+    if (p.kind !== 'text' && p.kind !== 'form' && p.kind !== 'sticker' && !p.fileId) { void upload(p); return; }
     const again = { ...p, status: 'sending' as const, reason: undefined };
     setPending((ps) => ps.map((x) => (x.clientId === clientId ? again : x)));
     transmit(again);
@@ -323,5 +332,5 @@ export function useRoomSocket(
     }
   }, [roomId, messages, hasMore, loadingOlder, merge]);
 
-  return { messages, pending, conn, connError, hasMore, loadingOlder, send, sendFile, sendForm, retry, discard, markRead, loadOlder };
+  return { messages, pending, conn, connError, hasMore, loadingOlder, send, sendFile, sendForm, sendSticker, retry, discard, markRead, loadOlder };
 }

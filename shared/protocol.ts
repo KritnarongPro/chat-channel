@@ -26,7 +26,11 @@ export interface ReplyRef { seq: number; senderId?: string; senderName?: string;
 
 /** ข้อมูลเสริมของข้อความ — การ์ดฟอร์ม { formId, formTitle } · ออเดอร์ { orderId }
  *  แจ้งเตือน: silent = ส่งแบบเงียบ (ไม่เด้ง) · replyTo = ตอบกลับข้อความไหน */
-export interface MessageExtra { formId?: string; formTitle?: string; orderId?: number; silent?: boolean; replyTo?: ReplyRef }
+export interface MessageExtra {
+  formId?: string; formTitle?: string; orderId?: number; silent?: boolean; replyTo?: ReplyRef;
+  stickerId?: string;   // เฟส 5: ข้อความชนิด sticker
+  noteId?: string;      // เฟส 5: ข้อความแจ้ง "โน้ตใหม่" ในห้อง (แตะเพื่อเปิดโน้ต)
+}
 
 /** สิ่งที่ส่งถึงแอปของผู้ใช้ (UserHub) เมื่อมีข้อความใหม่ในห้องที่ไม่ได้เปิดดูอยู่ */
 export interface ActivityFrame {
@@ -55,7 +59,7 @@ export interface ChatMessage {
   id: string;           // ไอดีที่หน้าเว็บสร้าง ใช้กันส่งซ้ำ
   senderId: string;
   senderName: string;
-  kind: 'text' | FileKind | 'form';  // form = การ์ดฟอร์มรับออเดอร์ (เฟส 4)
+  kind: 'text' | FileKind | 'form' | 'sticker';  // form = การ์ดฟอร์มรับออเดอร์ (เฟส 4) · sticker (เฟส 5)
   body: string;         // ข้อความ หรือคำบรรยายใต้ไฟล์ (ว่างได้ถ้าเป็นไฟล์)
   file: FileInfo | null;
   extra: MessageExtra | null;
@@ -64,7 +68,7 @@ export interface ChatMessage {
 
 // ---------- หน้าเว็บ → ห้อง ----------
 export type ClientFrame =
-  | { type: 'send'; clientId: string; body: string; kind?: 'text' | FileKind | 'form'; fileId?: string; extra?: MessageExtra }
+  | { type: 'send'; clientId: string; body: string; kind?: 'text' | FileKind | 'form' | 'sticker'; fileId?: string; extra?: MessageExtra }
   | { type: 'sync'; afterSeq: number }
   | { type: 'read'; seq: number }
   | { type: 'presence'; visible: boolean } // เฟส 3: หน้าจอห้องนี้เปิดอยู่ไหม (เปิดอยู่ = ไม่ส่งแจ้งเตือน)

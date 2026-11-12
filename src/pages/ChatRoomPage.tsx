@@ -4,13 +4,15 @@
 // เฟส 2: ส่งรูป (ย่อก่อนส่ง) / ส่งเป็นไฟล์ (ชัดเต็ม) / ไฟล์ / ข้อความเสียง
 // เฟส 3: ชาเนล (โพสต์ได้เฉพาะเจ้าของ/แอดมินชาเนล) · ปุ่ม 🔔/🔕 ปิดแจ้งเตือนรายห้อง
 // แจ้งเตือน: ปิดเสียงตามเวลา · ปักหมุด · ตอบกลับ · @ชื่อ · ส่งแบบเงียบ
+// เฟส 5: สติกเกอร์ (แผงเลือกในช่องพิมพ์) · ปุ่ม 📝 โน้ตของห้อง
 // =====================================================================
 
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router';
+import { Link, useNavigate, useParams } from 'react-router';
 import { thaiClock, thaiDate } from '../../shared/time';
 import { MAX_MESSAGE_CHARS } from '../../shared/protocol';
-import { ChatMessage, FormInfo, Room, RoomMember, User, api, errMsg } from '../api';
+import StickerPicker from '../StickerPicker';
+import { ChatMessage, FormInfo, Room, RoomMember, User, api, errMsg, stickerUrl } from '../api';
 import type { MessageExtra, ReplyRef } from '../../shared/protocol';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
@@ -44,6 +46,7 @@ export default function ChatRoomPage() {
   const [silent, setSilent] = useState(false);
   const [menuFor, setMenuFor] = useState<ChatMessage | null>(null);
   const [showMute, setShowMute] = useState(false);
+  const [showStickers, setShowStickers] = useState(false);
 
   const loadRoom = useCallback(async () => {
     try {
@@ -221,9 +224,12 @@ export default function ChatRoomPage() {
           </button>
         }
         right={room && (
-          <button className="btn btn-small btn-ghost" onClick={() => setShowMute(true)} aria-label="ตั้งค่าแจ้งเตือนห้องนี้">
-            {room.muted ? '🔕' : '🔔'}
-          </button>
+          <>
+            <Link to={`/room/${encodeURIComponent(id)}/notes`} className="btn btn-small btn-ghost" aria-label="โน้ตของห้องนี้">📝</Link>
+            <button className="btn btn-small btn-ghost" onClick={() => setShowMute(true)} aria-label="ตั้งค่าแจ้งเตือนห้องนี้">
+              {room.muted ? '🔕' : '🔔'}
+            </button>
+          </>
         )}
       />
       {connText && <div className={`banner ${s.conn === 'failed' ? 'banner-error' : 'banner-warning'}`} role="status">{connText}</div>}
@@ -248,7 +254,7 @@ export default function ChatRoomPage() {
             <div key={m.seq}>
               {showDate && <div className="date-sep">{d}</div>}
               <div className={`bubble-row ${mine ? 'mine' : ''}`} id={`msg-${m.seq}`}>
-                <div className="bubble">
+                <div className={`bubble ${m.kind === 'sticker' ? 'bubble-sticker' : ''}`}>
                   {!mine && isGroup && <div className="bubble-name">{m.senderName}</div>}
                   {m.extra?.replyTo && (
                     <button className="reply-quote" onClick={() => jumpTo(m.extra!.replyTo!.seq)}>
@@ -272,6 +278,7 @@ export default function ChatRoomPage() {
             <div className={`bubble ${p.status === 'failed' ? 'bubble-failed' : 'bubble-sending'}`}>
               {p.previewUrl && <img className="msg-image" src={p.previewUrl} alt="" />}
               {p.kind === 'form' && <div className="small">📝 การ์ดฟอร์ม: {p.extra?.formTitle}</div>}
+              {p.kind === 'sticker' && p.extra?.stickerId && <img className="sticker-img" src={stickerUrl(p.extra.stickerId)} alt="สติกเกอร์" />}
               {p.file && p.kind !== 'image' && (
                 <div className="small">{p.kind === 'voice' ? '🎤 ข้อความเสียง' : `📄 ${p.file.name}`} · {formatSize(p.file.blob.size)}</div>
               )}
@@ -318,6 +325,14 @@ export default function ChatRoomPage() {
             ))}
           </ul>
         )}
+        {showStickers && !recording && (
+          <StickerPicker onPick={(stickerId) => {
+            s.sendSticker(stickerId, outExtra());
+            setReplyTo(null);
+            setShowStickers(false);
+            stickBottom.current = true;
+          }} />
+        )}
         {recording ? (
           <VoiceRecorder
             onDone={(f) => { setRecording(false); queueFile(f); }}
@@ -330,6 +345,7 @@ export default function ChatRoomPage() {
           <button type="button" className="tool" onClick={() => imageInput.current?.click()} disabled={s.conn === 'failed'}>🖼 รูป</button>
           <button type="button" className="tool" onClick={() => fileInput.current?.click()} disabled={s.conn === 'failed'}>📎 ส่งเป็นไฟล์</button>
           <button type="button" className="tool" onClick={() => setRecording(true)} disabled={s.conn === 'failed'}>🎤 เสียง</button>
+          <button type="button" className={`tool ${showStickers ? 'tool-on' : ''}`} onClick={() => setShowStickers((v) => !v)} disabled={s.conn === 'failed'} aria-pressed={showStickers}>😺 สติกเกอร์</button>
           {me.user.role === 'admin' && (
             <button type="button" className="tool" onClick={() => void openFormPicker()} disabled={s.conn === 'failed'}>📝 ฟอร์ม</button>
           )}
@@ -419,6 +435,7 @@ function previewText(m: ChatMessage): string {
   if (m.kind === 'voice') return '[ข้อความเสียง]';
   if (m.kind === 'file') return `[ไฟล์] ${m.file?.name ?? ''}`;
   if (m.kind === 'form') return `[ฟอร์ม] ${m.extra?.formTitle ?? ''}`;
+  if (m.kind === 'sticker') return '[สติกเกอร์]';
   return '';
 }
 
@@ -527,7 +544,8 @@ function MembersPanel({ room, members, onClose, onChanged }: {
     try {
       const d = await api.get<{ users: User[] }>('/api/users');
       const inRoom = new Set(members.map((m) => m.id));
-      setUsers(d.users.filter((u) => !inRoom.has(u.id)));
+      // เฟส 5: กลุ่มเพิ่มได้เฉพาะเพื่อน (+ แอดมินระบบ/บอท) · ชาเนลเหมือนเดิม — เซิร์ฟเวอร์ตรวจซ้ำอีกชั้น
+      setUsers(d.users.filter((u) => !inRoom.has(u.id) && (room.type !== 'group' || u.canChat)));
     } catch (e) {
       setError(`โหลดรายชื่อไม่สำเร็จ: ${errMsg(e)}`);
     }

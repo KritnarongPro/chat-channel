@@ -1,5 +1,5 @@
 // =====================================================================
-// MessageContent.tsx — แสดงเนื้อหาข้อความตามชนิด: ข้อความ / รูป / ไฟล์ / เสียง
+// MessageContent.tsx — แสดงเนื้อหาข้อความตามชนิด: ข้อความ / รูป / ไฟล์ / เสียง / สติกเกอร์ (เฟส 5)
 // ไฟล์ครบ 180 วัน → "ไฟล์หมดอายุ" · เปิด/เล่นไม่ได้ → บอกเหตุผล + ทางเลือกดาวน์โหลด
 // =====================================================================
 
@@ -9,6 +9,7 @@ import type { ChatMessage } from '../shared/protocol';
 import { FILE_RETENTION_DAYS } from '../shared/protocol';
 import { nowThai } from '../shared/time';
 import { formatDuration, formatSize } from './media';
+import { stickerUrl } from './api';
 
 export default function MessageContent({ m, roomId }: { m: ChatMessage; roomId: string }) {
   const [broken, setBroken] = useState(false);
@@ -27,6 +28,20 @@ export default function MessageContent({ m, roomId }: { m: ChatMessage; roomId: 
             ? <Link className="btn btn-small" to={`/form/${encodeURIComponent(m.extra.formId)}?room=${encodeURIComponent(roomId)}`}>กรอกฟอร์ม</Link>
             : <span className="small error-text">การ์ดฟอร์มนี้ไม่มีรหัสฟอร์ม</span>}
         </div>
+      </>
+    );
+  }
+  // ---------- เฟส 5: สติกเกอร์ · ข้อความแจ้งโน้ตใหม่ ----------
+  if (m.kind === 'sticker') {
+    return m.extra?.stickerId
+      ? <img className="sticker-img" src={stickerUrl(m.extra.stickerId)} alt="สติกเกอร์" loading="lazy" />
+      : <span className="small error-text">สติกเกอร์นี้ไม่มีรหัสภาพ</span>;
+  }
+  if (m.kind === 'text' && m.extra?.noteId) {
+    return (
+      <>
+        <div className="bubble-body">{m.body}</div>
+        <Link className="small" to={`/note/${encodeURIComponent(m.extra.noteId)}`}>เปิดโน้ต</Link>
       </>
     );
   }

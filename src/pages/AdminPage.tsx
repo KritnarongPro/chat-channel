@@ -49,6 +49,7 @@ export default function AdminPage() {
       <div className="chips">
         <Link className="chip" to="/admin/bots">🤖 บอท</Link>
         <Link className="chip" to="/admin/forms">📝 ฟอร์ม</Link>
+        <Link className="chip" to="/admin/stickers">😺 สติกเกอร์</Link>
         <Link className="chip" to="/orders">📦 ออเดอร์</Link>
       </div>
       {error && <div className="banner banner-error" role="alert">{error}</div>}
