@@ -51,6 +51,9 @@ jobs:
     needs: check
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # secret อยู่ใน environment "production" ที่ตั้งให้ใช้ได้เฉพาะ branch main
+    # (กัน workflow ที่ถูกแอบแก้บน branch อื่นอ่าน secret ได้)
+    environment: production
     timeout-minutes: 20
     steps:
       - name: ตรวจว่าตั้ง Secrets ครบ
