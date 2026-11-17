@@ -26,6 +26,8 @@ export interface Env {
   APP_NAME: string;
   LINE_CHANNEL_ID?: string;
   LINE_CHANNEL_SECRET?: string;
+  GOOGLE_CLIENT_ID?: string;      // เข้าสู่ระบบด้วย Google (ไม่บังคับ — ไม่ตั้ง = ปุ่ม Google แจ้งเหตุผล)
+  GOOGLE_CLIENT_SECRET?: string;
   SETUP_TOKEN?: string;
 }
 
@@ -137,7 +139,7 @@ export type Need = 'any' | 'active' | 'admin' | 'bot';
 
 export async function requireUser(req: Request, env: Env, need: Need): Promise<User> {
   const token = readCookie(req, SESSION_COOKIE);
-  if (!token) throw new ApiError(401, 'NOT_LOGGED_IN', 'กรุณาเข้าสู่ระบบด้วย LINE');
+  if (!token) throw new ApiError(401, 'NOT_LOGGED_IN', 'กรุณาเข้าสู่ระบบ (LINE หรือ Google)');
   const tokenHash = await sha256(token);
   const row = await db('ตรวจ session', () =>
     env.DB.prepare(

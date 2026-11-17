@@ -82,7 +82,10 @@ export default function JoinPage({ me, reload }: { me: Me | null; reload: () => 
         ) : (
           <>
             <a className="btn btn-line btn-block join-btn" href={`/api/auth/line/start?invite=${encodeURIComponent(code)}`}>เข้าร่วมด้วย LINE</a>
-            <p className="small muted">ล็อกอินด้วย LINE ครั้งเดียว แล้วระบบพาเข้า{kind}ให้เลย</p>
+            <a className="btn btn-google btn-block join-btn" href={`/api/auth/google/start?invite=${encodeURIComponent(code)}`}>
+              <span className="g-logo" aria-hidden="true">G</span> เข้าร่วมด้วย Google
+            </a>
+            <p className="small muted">ล็อกอินด้วย LINE หรือ Google ครั้งเดียว แล้วระบบพาเข้า{kind}ให้เลย</p>
           </>
         )
       )}

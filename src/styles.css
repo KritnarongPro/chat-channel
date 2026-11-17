@@ -232,3 +232,8 @@ select { font: inherit; width: 100%; padding: 9px 10px; border: 1px solid var(--
 .seg { display: flex; gap: 6px; flex-wrap: wrap; }
 .font-preview { padding: 10px 12px; border-radius: 12px; background: var(--blue-soft); font-size: var(--chat-font); }
 .row { display: flex; align-items: center; gap: 10px; }
+
+/* ---------- เข้าสู่ระบบด้วย Google ---------- */
+.login-btn { min-width: 280px; justify-content: center; }
+.btn-google { background: var(--surface); color: var(--text); border: 1px solid var(--border); font-size: 18px; padding: 12px 24px; display: inline-flex; align-items: center; gap: 10px; }
+.g-logo { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; background: #fff; color: #4285f4; font-weight: 700; border: 1px solid #dadce0; }

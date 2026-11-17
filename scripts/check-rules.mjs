@@ -190,10 +190,25 @@ for (const f of walk('worker', ['.ts'])) {
   }
 }
 
+// ---------- BUGS-14 Google Login: ต้องตรวจค่าใน id_token ทุกตัว (กันไว้ก่อน) ----------
+// ไม่ตรวจ aud = รับ id_token ที่ออกให้แอปอื่น · ไม่ตรวจ nonce = เอา token เก่ามาใช้ซ้ำได้ · ไม่ตรวจ email_verified = อีเมลปลอม
+{
+  const g = read(join('worker', 'auth-google.ts'));
+  const need = [
+    [/c\.aud\s*!==\s*env\.GOOGLE_CLIENT_ID/, 'ตรวจ aud กับ GOOGLE_CLIENT_ID'],
+    [/GOOGLE_ISSUERS\.includes\(c\.iss\)/, 'ตรวจ iss'],
+    [/c\.exp\s*\*\s*1000\s*<\s*Date\.now\(\)/, 'ตรวจ exp (หมดอายุ)'],
+    [/c\.nonce\s*!==\s*saved\.nonce/, 'ตรวจ nonce กับ cookie'],
+    [/email_verified/, 'ตรวจ email_verified'],
+    [/state\s*!==\s*saved\.state/, 'ตรวจ state กับ cookie'],
+  ];
+  for (const [re, what] of need) if (!re.test(g)) fail('BUGS-14', `worker/auth-google.ts ต้อง${what}`);
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..06, BUGS-01..13)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..06, BUGS-01..14)');

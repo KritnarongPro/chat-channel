@@ -6,31 +6,30 @@
 //                              → สร้าง/อัปเดตผู้ใช้ → สร้าง session cookie → กลับหน้าแรก
 //   ล็อกอินผ่านลิงก์เชิญ (?invite=รหัส): หลังล็อกอินใช้ลิงก์ทันที → อนุมัติ + เข้าห้อง → พาไปห้องนั้น
 //                                       ลิงก์ใช้ไม่ได้ → พาไปหน้า /join/<รหัส>?error=รหัส (บอกเหตุผล)
+//   /api/auth/line/link      → (ต้องล็อกอินอยู่) โหมดผูก LINE ให้บัญชีที่สมัครด้วย Google
+//   ส่วนที่ใช้ร่วมกับ Google (state cookie, จบการล็อกอิน, ลิงก์เชิญ) อยู่ใน auth-common.ts
 // ล้มเหลวทุกจุด → พากลับหน้าแรกพร้อม ?login_error=รหัส (หน้าเว็บแสดงเหตุผลภาษาไทย)
 // =====================================================================
 
 import { nowThai } from '../shared/time';
-import { ApiError, Env, createSession, newId, randomToken, readCookie } from './lib';
-import { redeemInvite } from './invites';
+import { Env, newId, randomToken, readCookie, requireUser } from './lib';
+import {
+  backToApp as back, cleanInvite, clearStateCookie, finishLogin, linkResult, parseState, setStateCookie, type AuthMode,
+} from './auth-common';
 
 const LINE_AUTHORIZE = 'https://access.line.me/oauth2/v2.1/authorize';
 const LINE_TOKEN = 'https://api.line.me/oauth2/v2.1/token';
 const LINE_VERIFY = 'https://api.line.me/oauth2/v2.1/verify';
 const STATE_COOKIE = 'line_oauth';
-const STATE_MAX_AGE = 600; // 10 นาที
+const COOKIE_PATH = '/api/auth/line';
+const CLEAR = clearStateCookie(STATE_COOKIE, COOKIE_PATH);
 
 function callbackUrl(env: Env) {
   return `${env.APP_URL}/api/auth/line/callback`;
 }
 
-function backToApp(env: Env, error?: string, extraHeaders: Headers = new Headers()) {
-  const target = new URL(env.APP_URL);
-  if (error) target.searchParams.set('login_error', error);
-  extraHeaders.set('Location', target.toString());
-  // ลบ cookie state ทุกครั้งที่จบขั้นตอน
-  extraHeaders.append('Set-Cookie', `${STATE_COOKIE}=; Path=/api/auth/line; Max-Age=0; HttpOnly; Secure; SameSite=Lax`);
-  return new Response(null, { status: 302, headers: extraHeaders });
-}
+/** กลับหน้าแรก (ลบ cookie state ทุกครั้งที่จบขั้นตอน) */
+const backToApp = (env: Env, error?: string) => back(env, CLEAR, error);
 
 /** ตรวจว่าตั้งค่า LINE ครบ — ไม่ครบคืนรหัส error */
 export function lineConfigError(env: Env): string | null {
@@ -41,10 +40,10 @@ export function lineConfigError(env: Env): string | null {
 }
 
 // ---------- เริ่มล็อกอิน ----------
-export function lineStart(env: Env, invite?: string | null): Response {
+export function lineStart(env: Env, invite?: string | null, mode: AuthMode = 'login'): Response {
   const cfgErr = lineConfigError(env);
-  if (cfgErr) return backToApp(env, cfgErr);
-  const inviteCode = invite && /^[A-Za-z0-9_-]{6,40}$/.test(invite) ? invite : '';
+  if (cfgErr) return mode === 'link' ? linkResult(env, CLEAR, { error: cfgErr }) : backToApp(env, cfgErr);
+  const inviteCode = mode === 'login' ? cleanInvite(invite) : '';
 
   const state = randomToken(16);
   const nonce = randomToken(16);
@@ -60,7 +59,7 @@ export function lineStart(env: Env, invite?: string | null): Response {
     status: 302,
     headers: {
       Location: url.toString(),
-      'Set-Cookie': `${STATE_COOKIE}=${state}.${nonce}.${inviteCode}; Path=/api/auth/line; Max-Age=${STATE_MAX_AGE}; HttpOnly; Secure; SameSite=Lax`,
+      'Set-Cookie': setStateCookie(STATE_COOKIE, COOKIE_PATH, { state, nonce, invite: inviteCode, mode }),
     },
   });
 }
@@ -71,14 +70,15 @@ export async function lineCallback(req: Request, env: Env): Promise<Response> {
   if (cfgErr) return backToApp(env, cfgErr);
 
   const url = new URL(req.url);
-  if (url.searchParams.get('error')) return backToApp(env, 'LINE_DENIED'); // ผู้ใช้กดยกเลิกที่หน้า LINE
+  const saved = parseState(readCookie(req, STATE_COOKIE));
+  const linking = saved?.mode === 'link';
+  if (url.searchParams.get('error')) return linking ? linkResult(env, CLEAR, { error: 'LINE_DENIED' }) : backToApp(env, 'LINE_DENIED'); // ผู้ใช้กดยกเลิกที่หน้า LINE
 
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
-  const saved = readCookie(req, STATE_COOKIE);
   if (!code || !state || !saved) return backToApp(env, 'STATE_MISSING');
-  const [savedState, nonce, inviteCode] = saved.split('.');
-  if (state !== savedState || !nonce) return backToApp(env, 'STATE_MISMATCH');
+  const { nonce, invite: inviteCode } = saved;
+  if (state !== saved.state) return backToApp(env, 'STATE_MISMATCH');
 
   // ---------- แลก code → id_token ----------
   let idToken: string;
@@ -125,6 +125,8 @@ export async function lineCallback(req: Request, env: Env): Promise<Response> {
     return backToApp(env, 'LINE_UNREACHABLE');
   }
 
+  if (linking) return linkLine(req, env, profile.sub);
+
   // ---------- สร้าง/อัปเดตผู้ใช้ ----------
   const now = nowThai();
   const name = (profile.name || 'ผู้ใช้ LINE').slice(0, 80);
@@ -151,31 +153,31 @@ export async function lineCallback(req: Request, env: Env): Promise<Response> {
     return backToApp(env, 'DB_FAILED');
   }
 
-  // ---------- session ----------
-  let cookie: string;
-  try {
-    cookie = await createSession(env, userId);
-  } catch (err) {
-    console.error('สร้าง session ไม่สำเร็จ', err);
-    return backToApp(env, 'SESSION_FAILED');
-  }
-  const headers = new Headers();
-  headers.append('Set-Cookie', cookie);
+  return finishLogin(env, CLEAR, { id: userId, status }, inviteCode);
+}
 
-  // ---------- มาจากลิงก์เชิญ → ใช้ลิงก์เลย ----------
-  if (inviteCode) {
-    let path: string;
-    try {
-      const r = await redeemInvite(env, inviteCode, { id: userId, status });
-      path = `/room/${encodeURIComponent(r.roomId)}`;
-    } catch (err) {
-      const code = err instanceof ApiError ? err.code : 'INVITE_FAILED';
-      if (!(err instanceof ApiError)) console.error('ใช้ลิงก์เชิญหลังล็อกอินไม่สำเร็จ', err);
-      path = `/join/${encodeURIComponent(inviteCode)}?error=${encodeURIComponent(code)}`;
-    }
-    headers.set('Location', new URL(path, env.APP_URL).toString());
-    headers.append('Set-Cookie', `${STATE_COOKIE}=; Path=/api/auth/line; Max-Age=0; HttpOnly; Secure; SameSite=Lax`);
-    return new Response(null, { status: 302, headers });
+/** ผูก LINE ให้บัญชีที่สมัครด้วย Google (line_user_id ยังเป็น 'google:…') — LINE นี้เป็นของคนอื่นแล้ว → ไม่รวมบัญชี แจ้งเหตุผล */
+async function linkLine(req: Request, env: Env, lineSub: string): Promise<Response> {
+  let me: { id: string };
+  try {
+    me = await requireUser(req, env, 'any');
+  } catch (err) {
+    console.error('ผูก LINE: ไม่พบการล็อกอิน', err);
+    return linkResult(env, CLEAR, { error: 'NOT_LOGGED_IN' });
   }
-  return backToApp(env, undefined, headers);
+  try {
+    const row = await env.DB.prepare(`SELECT line_user_id FROM users WHERE id = ?`).bind(me.id).first<{ line_user_id: string }>();
+    if (!row) return linkResult(env, CLEAR, { error: 'NOT_LOGGED_IN' });
+    if (row.line_user_id === lineSub) return linkResult(env, CLEAR, { linked: 'line' });
+    if (!row.line_user_id.startsWith('google:')) return linkResult(env, CLEAR, { error: 'LINE_ALREADY_LINKED' });
+    const owner = await env.DB.prepare(`SELECT id FROM users WHERE line_user_id = ?`).bind(lineSub).first<{ id: string }>();
+    if (owner) return linkResult(env, CLEAR, { error: 'LINE_IN_USE' });
+    const r = await env.DB.prepare(`UPDATE users SET line_user_id = ?, updated_at = ? WHERE id = ? AND line_user_id LIKE 'google:%'`)
+      .bind(lineSub, nowThai(), me.id).run();
+    if (r.meta.changes !== 1) return linkResult(env, CLEAR, { error: 'DB_FAILED' });
+  } catch (err) {
+    console.error('ผูก LINE ลง D1 ไม่สำเร็จ', err);
+    return linkResult(env, CLEAR, { error: 'DB_FAILED' });
+  }
+  return linkResult(env, CLEAR, { linked: 'line' });
 }
