@@ -504,7 +504,7 @@ function MuteSheet({ room, onClose, onSaved }: {
 }
 
 // ---------------------------------------------------------------------
-// สมาชิกกลุ่ม + เพิ่มสมาชิก (เจ้าของ/แอดมินกลุ่มเท่านั้น)
+// สมาชิกกลุ่ม + เพิ่มสมาชิก + เปลี่ยนชื่อ (เจ้าของ/แอดมินห้องเท่านั้น)
 // ---------------------------------------------------------------------
 function MembersPanel({ room, members, onClose, onChanged }: {
   room: Room; members: RoomMember[]; onClose: () => void; onChanged: () => void;
@@ -513,6 +513,28 @@ function MembersPanel({ room, members, onClose, onChanged }: {
   const canAdd = room.myRole === 'owner' || room.myRole === 'admin';
   const isOwner = room.myRole === 'owner';
   const nav = useNavigate();
+  // ---------- เปลี่ยนชื่อกลุ่ม/ชาเนล (เจ้าของ/แอดมินห้อง) ----------
+  const [renaming, setRenaming] = useState(false);
+  const [newTitle, setNewTitle] = useState(room.title);
+  const [savingTitle, setSavingTitle] = useState(false);
+  const kindTh = room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม';
+
+  async function saveTitle() {
+    const t = newTitle.trim();
+    if (!t) { notify('error', `ชื่อ${kindTh}ว่าง บันทึกไม่ได้`); return; }
+    setSavingTitle(true);
+    try {
+      const r = await api.post<{ title: string; warning: string | null }>(`/api/rooms/${encodeURIComponent(room.id)}/title`, { title: t });
+      notify('success', `เปลี่ยนชื่อ${kindTh}เป็น "${r.title}" แล้ว`);
+      if (r.warning) notify('warning', r.warning);
+      setRenaming(false);
+      onChanged();
+    } catch (e) {
+      notify('error', `เปลี่ยนชื่อไม่สำเร็จ: ${errMsg(e)}`);
+    } finally {
+      setSavingTitle(false);
+    }
+  }
 
   async function setRole(m: RoomMember, role: 'admin' | 'member') {
     try {
@@ -572,9 +594,25 @@ function MembersPanel({ room, members, onClose, onChanged }: {
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
         <div className="sheet-head">
-          <b>{room.title}</b>
+          <b className="ellipsis">{room.title}</b>
+          {canAdd && !renaming && (
+            <button className="btn btn-small btn-ghost" onClick={() => { setNewTitle(room.title); setRenaming(true); }} aria-label={`เปลี่ยนชื่อ${kindTh}`}>
+              ✏️ เปลี่ยนชื่อ
+            </button>
+          )}
           <button className="link" onClick={onClose}>ปิด</button>
         </div>
+        {renaming && (
+          <div className="form-block">
+            <input value={newTitle} maxLength={80} onChange={(e) => setNewTitle(e.target.value)} autoFocus
+              onKeyDown={(e) => { if (e.key === 'Enter') void saveTitle(); }} placeholder={`ชื่อ${kindTh}ใหม่`} />
+            <div className="small muted">{newTitle.trim().length} / 80 ตัวอักษร · สมาชิกจะเห็นข้อความแจ้งในห้อง (มือถือไม่เด้ง)</div>
+            <div className="seg">
+              <button className="btn btn-small" disabled={savingTitle} onClick={() => void saveTitle()}>{savingTitle ? 'กำลังบันทึก…' : 'บันทึก'}</button>
+              <button className="btn btn-small btn-ghost" disabled={savingTitle} onClick={() => setRenaming(false)}>ยกเลิก</button>
+            </div>
+          </div>
+        )}
         {!adding ? (
           <>
             {room.description && <p className="small">{room.description}</p>}

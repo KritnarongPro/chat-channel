@@ -94,7 +94,7 @@ export default function InvitePanel({ roomId, roomTitle }: { roomId: string; roo
         <input value={maxUses} onChange={(e) => setMaxUses(e.target.value)} inputMode="numeric" placeholder="จำนวนคน (ว่าง = ไม่จำกัด)" />
       </div>
       <button className="btn btn-block" disabled={busy} onClick={() => void create()}>{busy ? 'กำลังสร้าง…' : '+ สร้างลิงก์เชิญ'}</button>
-      <p className="small muted">คนที่กดลิงก์และล็อกอิน LINE จะได้รับอนุมัติเข้าระบบทันที — ส่งลิงก์ให้เฉพาะคนที่ต้องการ</p>
+      <p className="small muted">คนที่กดลิงก์และเข้าสู่ระบบด้วย Gmail จะได้รับอนุมัติเข้าระบบทันที — ส่งลิงก์ให้เฉพาะคนที่ต้องการ</p>
 
       {error && <p className="error-text small">{error}</p>}
       {invites?.map((inv) => {
