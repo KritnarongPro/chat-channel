@@ -55,13 +55,11 @@ const routes: Route[] = [
   // ---------- auth (LINE Login) ----------
   { method: 'GET',  pattern: '/api/auth/line/start',          need: 'public', handler: (c) => lineStart(c.env, c.url.searchParams.get('invite')) },
   { method: 'GET',  pattern: '/api/auth/line/callback',       need: 'public', handler: (c) => lineCallback(c.req, c.env) },
-  { method: 'GET',  pattern: '/api/auth/line/link',           need: 'any',    handler: (c) => lineStart(c.env, null, 'link') },
   // ---------- เข้าสู่ระบบด้วย Google + ผูกบัญชี (ผู้ใช้เลือก: ผูกเองในหน้าบัญชี) ----------
   { method: 'GET',  pattern: '/api/auth/google/start',        need: 'public', handler: (c) => googleStart(c.env, 'login', c.url.searchParams.get('invite')) },
   { method: 'GET',  pattern: '/api/auth/google/link',         need: 'any',    handler: (c) => googleStart(c.env, 'link') },
   { method: 'GET',  pattern: '/api/auth/google/callback',     need: 'public', handler: (c) => googleCallback(c.req, c.env) },
   { method: 'GET',  pattern: '/api/me/identities',            need: 'any',    handler: getIdentities },
-  { method: 'POST', pattern: '/api/me/identities/google/unlink', need: 'any', handler: unlinkGoogle },
   { method: 'POST', pattern: '/api/auth/logout',              need: 'public', handler: logout },
   { method: 'GET',  pattern: '/api/me',                       need: 'any',    handler: me },
 
@@ -233,13 +231,13 @@ async function route(req: Request, env: Env): Promise<Response> {
 // ---------- health ----------
 async function health(c: Ctx) {
   const problems: string[] = [];
-  const lineErr = lineConfigError(c.env);
-  if (lineErr) problems.push(lineErr);
-  if (!c.env.SETUP_TOKEN) problems.push('NO_SETUP_TOKEN');
-  // ไม่บังคับ: ยังไม่ตั้ง Google → เข้าด้วย Google ไม่ได้ (ปุ่มจะแจ้งเหตุผล) แต่ระบบหลักใช้ได้
-  const warnings: string[] = [];
+  // ทางเข้าหลัก = Gmail (บังคับ) · LINE เหลือไว้ให้คนเดิมเข้ามาผูก Gmail เท่านั้น (ไม่ตั้ง = แค่เตือน)
   const googleErr = googleConfigError(c.env);
-  if (googleErr) warnings.push(googleErr);
+  if (googleErr) problems.push(googleErr);
+  if (!c.env.SETUP_TOKEN) problems.push('NO_SETUP_TOKEN');
+  const warnings: string[] = [];
+  const lineErr = lineConfigError(c.env);
+  if (lineErr) warnings.push(lineErr);
   try {
     await c.env.DB.prepare('SELECT 1 FROM users LIMIT 1').first();
   } catch (err) {
@@ -263,7 +261,11 @@ async function me(c: Ctx) {
   const hasAdmin = await db('ตรวจว่ามีแอดมินหรือยัง', () =>
     c.env.DB.prepare(`SELECT 1 AS x FROM users WHERE role = 'admin' LIMIT 1`).first(),
   );
-  return ok({ user: c.user, appName: c.env.APP_NAME, hasAdmin: !!hasAdmin });
+  // needsGoogle (2026-11-17 เลิกใช้ LINE): บัญชีที่ยังไม่ผูก Gmail → หน้าเว็บบังคับผูกก่อนใช้งาน
+  const g = await db('ตรวจการผูก Gmail', () =>
+    c.env.DB.prepare(`SELECT google_sub FROM users WHERE id = ?`).bind(c.user!.id).first<{ google_sub: string | null }>(),
+  );
+  return ok({ user: c.user, appName: c.env.APP_NAME, hasAdmin: !!hasAdmin, needsGoogle: !g?.google_sub });
 }
 
 // ---------- setup ----------
@@ -291,7 +293,7 @@ async function claimAdmin(c: Ctx) {
 }
 
 // ---------- admin ----------
-// ---------- บัญชีที่ผูก (LINE / Google) ----------
+// ---------- บัญชีที่ผูก (LINE / Google) — เลิกใช้ LINE แล้ว: แสดงสถานะเท่านั้น (ไม่มีผูก LINE / เลิกผูก Gmail) ----------
 async function getIdentities(c: Ctx) {
   const r = await db('อ่านบัญชีที่ผูก', () =>
     c.env.DB.prepare(`SELECT line_user_id, google_sub, email FROM users WHERE id = ?`).bind(c.user!.id)
@@ -303,19 +305,6 @@ async function getIdentities(c: Ctx) {
     google: r.google_sub ? { email: r.email } : null,
     googleReady: googleConfigError(c.env) === null,
   });
-}
-
-/** เลิกผูก Google — ทำได้เมื่อยังมี LINE ไว้เข้าสู่ระบบ (ไม่งั้นบัญชีจะเข้าไม่ได้อีก) */
-async function unlinkGoogle(c: Ctx) {
-  const r = await db('เลิกผูก Google', () =>
-    c.env.DB.prepare(
-      `UPDATE users SET google_sub = NULL, email = NULL, updated_at = ? WHERE id = ? AND google_sub IS NOT NULL AND line_user_id NOT LIKE 'google:%'`,
-    ).bind(nowThai(), c.user!.id).run(),
-  );
-  if (r.meta.changes !== 1) {
-    throw new ApiError(409, 'CANNOT_UNLINK', 'เลิกผูก Google ไม่ได้ — ต้องผูก LINE ไว้ก่อน (ไม่งั้นจะเข้าสู่ระบบไม่ได้อีก) หรือยังไม่ได้ผูก Google');
-  }
-  return ok({ unlinked: true });
 }
 
 async function adminListUsers(c: Ctx) {

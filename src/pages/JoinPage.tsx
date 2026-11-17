@@ -8,6 +8,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { thaiClock, thaiDate } from '../../shared/time';
 import { LOGIN_ERRORS, Me, api, errMsg } from '../api';
+import { escapeInAppBrowser } from '../pwa';
 
 interface InviteInfo {
   valid: boolean; problem: string | null; problemCode: string | null;
@@ -56,6 +57,8 @@ export default function JoinPage({ me, reload }: { me: Me | null; reload: () => 
   }
 
   const kind = info?.room?.type === 'channel' ? 'ชาเนล' : 'กลุ่ม';
+  // ยังไม่ล็อกอิน + เปิดในแอป LINE/FB → Google ไม่ให้ล็อกอิน → พาออกไปเบราว์เซอร์ (หรือบอกวิธี)
+  const blocked = me ? null : escapeInAppBrowser();
   return (
     <div className="center join">
       <div className="join-icon" aria-hidden="true">{info?.room?.type === 'channel' ? '📢' : '👥'}</div>
@@ -81,11 +84,15 @@ export default function JoinPage({ me, reload }: { me: Me | null; reload: () => 
           </button>
         ) : (
           <>
-            <a className="btn btn-line btn-block join-btn" href={`/api/auth/line/start?invite=${encodeURIComponent(code)}`}>เข้าร่วมด้วย LINE</a>
-            <a className="btn btn-google btn-block join-btn" href={`/api/auth/google/start?invite=${encodeURIComponent(code)}`}>
-              <span className="g-logo" aria-hidden="true">G</span> เข้าร่วมด้วย Google
-            </a>
-            <p className="small muted">ล็อกอินด้วย LINE หรือ Google ครั้งเดียว แล้วระบบพาเข้า{kind}ให้เลย</p>
+            {blocked ? (
+              <p className="error-text" role="alert">{blocked}</p>
+            ) : (
+              <a className="btn btn-google btn-block join-btn" href={`/api/auth/google/start?invite=${encodeURIComponent(code)}`}>
+                <span className="g-logo" aria-hidden="true">G</span> เข้าร่วมด้วย Gmail
+              </a>
+            )}
+            <p className="small muted">เข้าด้วย Gmail ครั้งเดียว แล้วระบบพาเข้า{kind}ให้เลย</p>
+            <p className="small muted">เคยใช้ด้วย LINE? <a href={`/api/auth/line/start?invite=${encodeURIComponent(code)}`}>เข้าด้วย LINE ครั้งสุดท้าย</a> แล้วผูก Gmail</p>
           </>
         )
       )}

@@ -32,6 +32,7 @@ import RoomNotesPage from './pages/RoomNotesPage';
 import NotePage from './pages/NotePage';
 import AdminStickersPage from './pages/AdminStickersPage';
 import AccountPage from './pages/AccountPage';
+import LinkGooglePage from './pages/LinkGooglePage';
 import { applyPrefs, cachedPrefs, Prefs } from './prefs';
 import { useNotify } from './notice';
 import './styles.css';
@@ -104,7 +105,9 @@ function App() {
 
   return (
     <MeContext.Provider value={{ me, reload, logout }}>
-      {me.user.status !== 'active' ? (
+      {me.needsGoogle ? (
+        <LinkGooglePage />  // เลิกใช้ LINE (2026-11-17): ยังไม่ผูก Gmail → ผูกก่อนใช้งาน (ทั้งรออนุมัติและใช้งานอยู่)
+      ) : me.user.status !== 'active' ? (
         <PendingPage />
       ) : (
         <>

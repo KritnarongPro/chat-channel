@@ -6,13 +6,14 @@
 //                              → สร้าง/อัปเดตผู้ใช้ → สร้าง session cookie → กลับหน้าแรก
 //   ล็อกอินผ่านลิงก์เชิญ (?invite=รหัส): หลังล็อกอินใช้ลิงก์ทันที → อนุมัติ + เข้าห้อง → พาไปห้องนั้น
 //                                       ลิงก์ใช้ไม่ได้ → พาไปหน้า /join/<รหัส>?error=รหัส (บอกเหตุผล)
-//   /api/auth/line/link      → (ต้องล็อกอินอยู่) โหมดผูก LINE ให้บัญชีที่สมัครด้วย Google
+//   ⚠️ 2026-11-17 ผู้ใช้เลือกเลิกใช้ LINE: ปุ่ม LINE ซ่อนแล้ว เหลือลิงก์เล็ก "เคยเข้าด้วย LINE" ให้คนเดิมเข้ามาผูก Gmail
+//      · ไม่รับสมัครใหม่ด้วย LINE (LINE_SIGNUP_CLOSED) · โหมดผูก LINE (link) ไม่มี route เรียกแล้ว
 //   ส่วนที่ใช้ร่วมกับ Google (state cookie, จบการล็อกอิน, ลิงก์เชิญ) อยู่ใน auth-common.ts
 // ล้มเหลวทุกจุด → พากลับหน้าแรกพร้อม ?login_error=รหัส (หน้าเว็บแสดงเหตุผลภาษาไทย)
 // =====================================================================
 
 import { nowThai } from '../shared/time';
-import { Env, newId, randomToken, readCookie, requireUser } from './lib';
+import { Env, randomToken, readCookie, requireUser } from './lib';
 import {
   backToApp as back, cleanInvite, clearStateCookie, finishLogin, linkResult, parseState, setStateCookie, type AuthMode,
 } from './auth-common';
@@ -142,11 +143,8 @@ export async function lineCallback(req: Request, env: Env): Promise<Response> {
         .bind(name, profile.picture ?? null, now, existing.id).run();
       userId = existing.id;
     } else {
-      userId = newId();
-      await env.DB.prepare(
-        `INSERT INTO users (id, line_user_id, display_name, picture_url, status, role, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'pending', 'member', ?, ?)`,
-      ).bind(userId, profile.sub, name, profile.picture ?? null, now, now).run();
+      // เลิกรับสมัครใหม่ด้วย LINE — สมัครใหม่ใช้ Gmail (ไม่สร้างบัญชีค้าง)
+      return backToApp(env, 'LINE_SIGNUP_CLOSED');
     }
   } catch (err) {
     console.error('บันทึกผู้ใช้ลง D1 ไม่สำเร็จ', err);
