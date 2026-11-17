@@ -81,6 +81,7 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/rooms/:id/members',        need: 'active', handler: addMembers },
   { method: 'POST', pattern: '/api/rooms/:id/mute',           need: 'active', handler: setMute },
   { method: 'POST', pattern: '/api/rooms/:id/pin',            need: 'active', handler: pinMessage },
+  { method: 'POST', pattern: '/api/rooms/:id/title',          need: 'active', handler: renameRoom },
 
   // ---------- notify: ตั้งค่าแจ้งเตือนรวม + การเชื่อมต่อของแอป (แจ้งเตือนในแอป) ----------
   { method: 'GET',  pattern: '/api/me/notify-settings',       need: 'active', handler: getNotifySettings },
@@ -637,6 +638,45 @@ async function pinMessage(c: Ctx) {
     console.error('แจ้งอัปเดตปักหมุดให้คนในห้องไม่สำเร็จ', err);
   }
   return ok({ pinned: body.seq ?? null });
+}
+
+/**
+ * เปลี่ยนชื่อกลุ่ม/ชาเนล — เฉพาะเจ้าของ/แอดมินของห้อง (ผู้ใช้เลือก 2026-11-17)
+ * แจ้งในห้องแบบเงียบ "✏️ X เปลี่ยนชื่อ…เป็น …" (ขึ้นในแชท แต่มือถือไม่เด้ง) + ให้คนที่เปิดห้องอยู่โหลดชื่อใหม่
+ */
+async function renameRoom(c: Ctx) {
+  const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
+  if (room.type === 'dm') throw new ApiError(400, 'DM_NO_TITLE', 'แชท 1:1 ไม่มีชื่อห้องให้เปลี่ยน');
+  const kindTh = room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม';
+  if (role !== 'owner' && role !== 'admin') {
+    throw new ApiError(403, 'NOT_ROOM_ADMIN', `เฉพาะเจ้าของ/แอดมิน${kindTh}เท่านั้นที่เปลี่ยนชื่อได้`);
+  }
+  const body = await readJson<{ title?: unknown }>(c.req);
+  const title = typeof body.title === 'string' ? body.title.trim() : '';
+  if (title.length < 1 || title.length > 80) throw new ApiError(400, 'BAD_TITLE', `ชื่อ${kindTh}ต้องมี 1–80 ตัวอักษร`);
+  const old = await db('อ่านชื่อห้อง', () =>
+    c.env.DB.prepare(`SELECT title FROM rooms WHERE id = ?`).bind(c.params.id).first<{ title: string | null }>(),
+  );
+  if (old?.title === title) throw new ApiError(400, 'SAME_TITLE', `ชื่อ${kindTh}เหมือนเดิม ไม่มีอะไรเปลี่ยน`);
+  await db(`เปลี่ยนชื่อ${kindTh}`, () =>
+    c.env.DB.prepare(`UPDATE rooms SET title = ? WHERE id = ?`).bind(title, c.params.id).run(),
+  );
+  // ชื่อบันทึกแล้ว — แจ้งในห้องไม่สำเร็จให้ตอบคำเตือนพร้อมเหตุผล (ไม่ทำให้การเปลี่ยนชื่อล้ม)
+  let warning: string | null = null;
+  try {
+    await postToRoom(c.env, c.params.id, c.user!, {
+      kind: 'text', body: `✏️ ${c.user!.displayName} เปลี่ยนชื่อ${kindTh}เป็น "${title}"`, extra: { silent: true },
+    });
+  } catch (err) {
+    console.error('แจ้งเปลี่ยนชื่อในห้องไม่สำเร็จ', err);
+    warning = `เปลี่ยนชื่อแล้ว แต่แจ้งในห้องไม่สำเร็จ: ${err instanceof ApiError ? err.message : 'ระบบขัดข้อง'}`;
+  }
+  try {
+    await roomStub(c.env, c.params.id).fetch(new Request('https://room/broadcast', { method: 'POST', headers: { 'X-Room-Id': c.params.id } }));
+  } catch (err) {
+    console.error('แจ้งอัปเดตชื่อห้องให้คนที่เปิดอยู่ไม่สำเร็จ', err);
+  }
+  return ok({ title, warning });
 }
 
 // ---------- channels ----------
