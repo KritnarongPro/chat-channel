@@ -65,6 +65,23 @@ export async function oneClickInstall(): Promise<'accepted' | 'dismissed' | 'una
   return outcome;
 }
 
+/**
+ * ก่อนกดเข้าด้วย Google: Google ไม่ยอมให้ล็อกอินในเบราว์เซอร์ที่ฝังในแอป (LINE, Facebook, IG ฯลฯ)
+ *   ในแอป LINE → พาออกไป Chrome/Safari อัตโนมัติ (ใส่ ?openExternalBrowser=1 — ทำครั้งเดียว กันวนซ้ำ)
+ *   แอปอื่นพาออกเองไม่ได้ → คืนข้อความบอกวิธี (หน้าเว็บแสดงแทนปุ่ม Google)
+ *   เบราว์เซอร์ปกติ → null
+ */
+export function escapeInAppBrowser(): string | null {
+  if (inLineApp) {
+    if (!new URL(location.href).searchParams.has('openExternalBrowser')) openInExternalBrowser();
+    return 'กำลังเปิดใน Chrome/Safari… ถ้าไม่เปิดเอง ให้กดเมนู ⋮ มุมขวาบน → "เปิดในเบราว์เซอร์อื่น" (Google ไม่ให้เข้าสู่ระบบในแอป LINE)';
+  }
+  if (inOtherInApp) {
+    return 'Google ไม่ให้เข้าสู่ระบบในเบราว์เซอร์ของแอปนี้ — กดเมนู ⋯ แล้วเลือก "เปิดในเบราว์เซอร์" (Chrome/Safari) ก่อน';
+  }
+  return null;
+}
+
 /** เปิดหน้านี้ใหม่ในเบราว์เซอร์จริง (ออกจากในแอป LINE) */
 export function openInExternalBrowser() {
   const url = new URL(location.href);

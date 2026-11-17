@@ -205,10 +205,20 @@ for (const f of walk('worker', ['.ts'])) {
   for (const [re, what] of need) if (!re.test(g)) fail('BUGS-14', `worker/auth-google.ts ต้อง${what}`);
 }
 
+// ---------- BUGS-15 เลิกใช้ LINE (2026-11-17): ห้ามเปิดรับสมัครใหม่ด้วย LINE + ต้องบังคับผูก Gmail ----------
+// LINE เหลือไว้ให้คนเดิมเข้ามาผูก Gmail เท่านั้น — ถ้ามีคนเผลอเปิดสมัครใหม่ด้วย LINE กลับมา คนนั้นจะติดหน้าบังคับผูกทันที
+{
+  const line = read(join('worker', 'auth-line.ts'));
+  if (!/LINE_SIGNUP_CLOSED/.test(line) || /INSERT INTO users/.test(line)) {
+    fail('BUGS-15', 'worker/auth-line.ts ต้องตอบ LINE_SIGNUP_CLOSED ให้คนใหม่ และต้องไม่มี INSERT INTO users');
+  }
+  if (!/me\.needsGoogle\s*\?/.test(read(join('src', 'main.tsx')))) fail('BUGS-15', 'src/main.tsx ต้องเช็ก me.needsGoogle ก่อนเข้าแอป (หน้าบังคับผูก Gmail)');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..06, BUGS-01..14)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..06, BUGS-01..15)');

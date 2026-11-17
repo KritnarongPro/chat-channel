@@ -101,7 +101,7 @@ export interface User {
   canChat?: boolean;                                      // เฟส 5: ทักแชท/เพิ่มเข้ากลุ่มได้เลย (เพื่อน หรือ แอดมิน/บอท)
 }
 
-export interface Me { user: User; appName: string; hasAdmin: boolean }
+export interface Me { user: User; appName: string; hasAdmin: boolean; needsGoogle: boolean }  // needsGoogle: ยังไม่ผูก Gmail → บังคับผูก
 
 export interface Room {
   id: string;
@@ -175,6 +175,7 @@ export const LOGIN_ERRORS: Record<string, string> = {
   GOOGLE_IN_USE: 'บัญชี Google นี้ผูกกับผู้ใช้อื่นในระบบแล้ว (อาจเคยสมัครด้วย Google แยกไว้) — แจ้งแอดมินให้ช่วยจัดการ',
   LINE_IN_USE: 'บัญชี LINE นี้ผูกกับผู้ใช้อื่นในระบบแล้ว — แจ้งแอดมินให้ช่วยจัดการ',
   LINE_ALREADY_LINKED: 'บัญชีนี้ผูก LINE อยู่แล้ว',
+  LINE_SIGNUP_CLOSED: 'ระบบเลิกรับสมัครด้วย LINE แล้ว — กรุณาสมัครด้วย Gmail (ปุ่มด้านบน)',
 };
 
 // ---------------------------------------------------------------------

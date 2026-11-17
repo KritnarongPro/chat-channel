@@ -107,7 +107,7 @@ export default function ChatListPage() {
               <li><Link to="/friends">👥 เพื่อน{friendReqs > 0 ? ` · คำขอ ${friendReqs}` : ''}</Link></li>
               <li><Link to="/notes">🗒 โน้ตของฉัน</Link></li>
               <li><Link to="/appearance">🎨 หน้าตาแอป (ธีม / ตัวอักษร)</Link></li>
-              <li><Link to="/account">👤 บัญชี (ผูก LINE / Google)</Link></li>
+              <li><Link to="/account">👤 บัญชี (Gmail ที่ใช้เข้า)</Link></li>
               <li><Link to="/settings">🔔 ตั้งค่าแจ้งเตือน</Link></li>
               <li><Link to="/orders">📦 ออเดอร์</Link></li>
               {me.user.role === 'admin' && <li><Link to="/admin">🛠 แอดมิน</Link></li>}
