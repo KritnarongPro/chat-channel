@@ -20,6 +20,7 @@ export default function LoginPage() {
       <p className="muted small">ผู้ใช้ใหม่ต้องรอแอดมินอนุมัติก่อนใช้งาน</p>
       <p className="muted small">มีบัญชีที่เข้าด้วย LINE อยู่แล้ว? เข้าด้วย LINE ก่อน แล้วกด "ผูก Google" ในเมนู ☰ → บัญชี<br />
         (ถ้าเข้าด้วย Google ตรง ๆ จะเป็นบัญชีใหม่แยกกัน)</p>
+      <p className="small"><a href="/privacy">นโยบายความเป็นส่วนตัว</a></p>
     </div>
   );
 }
