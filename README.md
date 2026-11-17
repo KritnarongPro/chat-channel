@@ -24,7 +24,7 @@
 6. **LINE Login channel ต้องเป็น Published** (ไม่งั้นล็อกอินได้เฉพาะ Admin/Tester ของ channel)
 7. **โดเมน** `noti.kalon-ai.app` — โซน `kalon-ai.app` ต้องอยู่ใน Cloudflare account เดียวกัน (ตั้งใน `wrangler.jsonc` → routes)
 8. **เข้าสู่ระบบด้วย Google (ไม่บังคับ)** — ไม่ตั้ง = ปุ่ม Google แจ้งเหตุผล แต่ LINE ใช้ได้ปกติ (`/api/health` → `warnings`)
-   - Google Cloud Console → **Google Auth Platform** → Branding: ชื่อแอป + อีเมลติดต่อ
+   - Google Cloud Console → **Google Auth Platform** → Branding: ชื่อแอป + อีเมลติดต่อ · Application home page `https://noti.kalon-ai.app` · Privacy policy `https://noti.kalon-ai.app/privacy` (หน้า `public/privacy.html`) · Authorized domains `kalon-ai.app`
    - Audience: เลือก **External** → กด **Publish app** ให้เป็น **In production** (ไม่งั้นเข้าได้เฉพาะ Test users)
    - Clients → **Create client** → ชนิด **Web application** → Authorized redirect URI: `https://noti.kalon-ai.app/api/auth/google/callback`
    - เอา Client ID / Client secret ไปใส่ Worker secrets: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
