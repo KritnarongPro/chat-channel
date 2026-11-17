@@ -10,9 +10,11 @@
 //   กดค้าง/คลิกขวาที่ข้อความ = เปิดเมนูข้อความ
 // ชุด 2 (2026-11-17): วิดีโอ (50MB) · อัลบั้ม (เลือกหลายรูป/วิดีโอ = ตารางในบับเบิลเดียว) · 📊 โพล · ปักหมุด/ประกาศ 5 อัน
 //   · "กำลังพิมพ์…" · ลิงก์ในข้อความ + ตัวอย่างลิงก์ (ใน MessageContent)
+// เมนูกดค้างแบบ LINE (2026-11-17): กล่องตารางไอคอนติดข้อความ + แถบอีโมจิ · เพิ่ม คัดลอกบางส่วน / Keep (โน้ตส่วนตัว)
+//   / โน้ตในห้อง / ลบเฉพาะฝั่งฉัน (DO v8)
 // =====================================================================
 
-import { FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { FormEvent, KeyboardEvent, ReactElement, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { nowThai, thaiAfter, thaiClock, thaiDate, thaiShort } from '../../shared/time';
 import { ALBUM_MAX, MAX_MESSAGE_CHARS, POLL_MAX_OPTIONS, POLL_OPTION_MAX, POLL_QUESTION_MAX, REACTIONS } from '../../shared/protocol';
@@ -50,7 +52,11 @@ export default function ChatRoomPage() {
   // ---------- แจ้งเตือน: สถานะของช่องพิมพ์ ----------
   const [replyTo, setReplyTo] = useState<ReplyRef | null>(null);
   const [silent, setSilent] = useState(false);
-  const [menuFor, setMenuFor] = useState<ChatMessage | null>(null);
+  const [menu, setMenu] = useState<{ m: ChatMessage; rect: DOMRect } | null>(null);
+  /** เปิดเมนูกดค้างติดกับข้อความ (el = บับเบิล/รูปที่กด) */
+  const openMenu = (m: ChatMessage, el: Element) => setMenu({ m, rect: el.getBoundingClientRect() });
+  const [copyPart, setCopyPart] = useState<ChatMessage | null>(null);
+  const nav = useNavigate();
   const [showMute, setShowMute] = useState(false);
   const [showStickers, setShowStickers] = useState(false);
   const [showRoomMenu, setShowRoomMenu] = useState(false);
@@ -280,10 +286,20 @@ export default function ChatRoomPage() {
   const isRoomAdmin = !!room && (room.myRole === 'owner' || room.myRole === 'admin');
 
   // ---------- กดค้าง (มือถือ) / คลิกขวา (คอม) ที่ข้อความ = เปิดเมนู ----------
-  function pressStart(m: ChatMessage) {
-    if (m.deleted) return;
+  function pressStart(m: ChatMessage, el: Element) {
     clearTimeout(pressTimer.current);
-    pressTimer.current = window.setTimeout(() => setMenuFor(m), 500);
+    pressTimer.current = window.setTimeout(() => openMenu(m, el), 500);
+  }
+
+  // ---------- Keep: บันทึกข้อความลงโน้ตส่วนตัว (พร้อมชื่อคนส่ง เวลา และห้อง) ----------
+  async function keepMsg(m: ChatMessage) {
+    const text = `${m.body || previewText(m)}\n\n— ${m.senderName} · ${thaiDate(m.createdAt)} ${thaiClock(m.createdAt)} · ${room?.title ?? 'แชท'}`;
+    try {
+      await api.post('/api/me/notes', { body: text.slice(0, 10000) });
+      notify('success', 'เก็บลง Keep (☰ → โน้ตของฉัน) แล้ว');
+    } catch (e) {
+      notify('error', `เก็บลง Keep ไม่สำเร็จ: ${errMsg(e)}`);
+    }
   }
   const pressEnd = () => clearTimeout(pressTimer.current);
   const connText =
@@ -350,8 +366,8 @@ export default function ChatRoomPage() {
                     <div className={`album-grid n${Math.min(ms.length, 4)}`}>
                       {ms.map((m) => (
                         <div key={m.seq} id={`msg-${m.seq}`} className="album-tile"
-                          onContextMenu={(e) => { e.preventDefault(); setMenuFor(m); }}
-                          onTouchStart={() => pressStart(m)} onTouchEnd={pressEnd} onTouchMove={pressEnd}>
+                          onContextMenu={(e) => { e.preventDefault(); openMenu(m, e.currentTarget); }}
+                          onTouchStart={(e) => pressStart(m, e.currentTarget)} onTouchEnd={pressEnd} onTouchMove={pressEnd}>
                           <AlbumTile m={m} />
                           {!!m.reactions?.length && (
                             <button className="album-react" onClick={() => setReactionsFor(m)} aria-label="ดูว่าใครกดรีแอคชัน">
@@ -369,7 +385,7 @@ export default function ChatRoomPage() {
                         : <button className="read-mark link" onClick={() => setReadersFor(readers)}>อ่านแล้ว {readers.length} </button>
                       )}
                       {ms.length} รายการ · {thaiClock(last.createdAt)}
-                      <button className="bubble-more" onClick={() => setMenuFor(last)} aria-label="ตัวเลือก (รูปสุดท้าย) — กดค้างที่รูปเพื่อเลือกรูปนั้น">⋯</button>
+                      <button className="bubble-more" onClick={(e) => openMenu(last, e.currentTarget.closest('.bubble') ?? e.currentTarget)} aria-label="ตัวเลือก (รูปสุดท้าย) — กดค้างที่รูปเพื่อเลือกรูปนั้น">⋯</button>
                     </div>
                   </div>
                 </div>
@@ -391,8 +407,8 @@ export default function ChatRoomPage() {
               <div className={`bubble-row ${mine ? 'mine' : ''}`} id={`msg-${m.seq}`}>
                 <div
                   className={`bubble ${m.kind === 'sticker' ? 'bubble-sticker' : ''}`}
-                  onContextMenu={(e) => { if (!m.deleted) { e.preventDefault(); setMenuFor(m); } }}
-                  onTouchStart={() => pressStart(m)} onTouchEnd={pressEnd} onTouchMove={pressEnd}
+                  onContextMenu={(e) => { e.preventDefault(); openMenu(m, e.currentTarget); }}
+                  onTouchStart={(e) => pressStart(m, e.currentTarget)} onTouchEnd={pressEnd} onTouchMove={pressEnd}
                 >
                   {!mine && isGroup && <div className="bubble-name">{m.senderName}</div>}
                   {!m.deleted && m.extra?.forwardedFrom && <div className="forwarded">↪️ ส่งต่อจาก {m.extra.forwardedFrom}</div>}
@@ -424,7 +440,7 @@ export default function ChatRoomPage() {
                     )}
                     {m.extra?.silent && <span title="ส่งแบบเงียบ">🔕 </span>}
                     {thaiClock(m.createdAt)}
-                    {!m.deleted && <button className="bubble-more" onClick={() => setMenuFor(m)} aria-label="ตัวเลือกข้อความ">⋯</button>}
+                    <button className="bubble-more" onClick={(e) => openMenu(m, e.currentTarget.closest('.bubble') ?? e.currentTarget)} aria-label="ตัวเลือกข้อความ">⋯</button>
                   </div>
                 </div>
               </div>
@@ -557,34 +573,48 @@ export default function ChatRoomPage() {
         </div>
       )}
 
-      {menuFor && (
-        <MessageMenu
-          m={menuFor}
-          canReply={!!room?.canPost}
-          canPin={canPin}
-          isPinned={pins.some((p) => p.seq === menuFor.seq)}
-          canUnsend={menuFor.senderId === me.user.id && Date.now() - Date.parse(menuFor.createdAt) <= UNSEND_MS}
-          canModerate={!!room && room.type !== 'dm' && (room.myRole === 'owner' || room.myRole === 'admin')}
-          onDelete={(asAdmin) => { const m = menuFor; setMenuFor(null); void deleteMsg(m, asAdmin); }}
-          onClose={() => setMenuFor(null)}
-          onReply={() => {
-            setReplyTo({ seq: menuFor.seq, senderName: menuFor.senderName, snippet: previewText(menuFor) });
-            setMenuFor(null);
+      {menu && (
+        <MessagePopup
+          m={menu.m}
+          rect={menu.rect}
+          canReply={!!room?.canPost && !menu.m.deleted}
+          canPin={canPin && !menu.m.deleted}
+          isPinned={pins.some((p) => p.seq === menu.m.seq)}
+          canUnsend={!menu.m.deleted && menu.m.senderId === me.user.id && Date.now() - Date.parse(menu.m.createdAt) <= UNSEND_MS}
+          canModerate={!menu.m.deleted && isRoomAdmin && room?.type !== 'dm'}
+          canNote={!menu.m.deleted && !!room?.canPost}
+          canForward={!menu.m.deleted && menu.m.kind !== 'poll' && (menu.m.kind !== 'form' || me.user.role === 'admin')}
+          myReaction={menu.m.reactions?.find((g) => g.users.some((u) => u.id === me.user.id))?.emoji ?? null}
+          canReact={s.conn === 'open' && !menu.m.deleted}
+          onClose={() => setMenu(null)}
+          onAction={(a) => {
+            const m = menu.m;
+            setMenu(null);
+            switch (a) {
+              case 'copy':
+                void copyText(m.body).then((okCopy) => okCopy
+                  ? notify('success', 'คัดลอกข้อความแล้ว')
+                  : notify('error', 'คัดลอกไม่สำเร็จ — เบราว์เซอร์ไม่อนุญาตให้เข้าถึงคลิปบอร์ด (ลองใช้ "คัดลอกบางส่วน")'));
+                break;
+              case 'copyPart': setCopyPart(m); break;
+              case 'keep': void keepMsg(m); break;
+              case 'hide':
+                if (confirm('ลบข้อความนี้เฉพาะในแชทของคุณ? คนอื่นในห้องยังเห็นอยู่ (ถ้าอยากให้ทุกคนไม่เห็น ใช้ "ยกเลิกข้อความ")')) s.hide(m.seq);
+                break;
+              case 'unsend': void deleteMsg(m, false); break;
+              case 'adminDelete': void deleteMsg(m, true); break;
+              case 'reply': setReplyTo({ seq: m.seq, senderName: m.senderName, snippet: previewText(m) }); break;
+              case 'forward': setForwardFor(m); break;
+              case 'note': nav(`/room/${encodeURIComponent(id)}/notes`, { state: { draft: `${m.body || previewText(m)}\n\n— ${m.senderName} · ${thaiDate(m.createdAt)} ${thaiClock(m.createdAt)}` } }); break;
+              case 'pin': void pin(m.seq, false); break;
+              case 'announce': void pin(m.seq, true); break;
+              case 'unpin': void unpin(m.seq); break;
+            }
           }}
-          onPin={(notifyAll) => { void pin(menuFor.seq, notifyAll); setMenuFor(null); }}
-          onUnpin={() => { void unpin(menuFor.seq); setMenuFor(null); }}
-          onCopy={async () => {
-            setMenuFor(null);
-            if (await copyText(menuFor.body)) notify('success', 'คัดลอกข้อความแล้ว');
-            else notify('error', 'คัดลอกไม่สำเร็จ — เบราว์เซอร์ไม่อนุญาตให้เข้าถึงคลิปบอร์ด (ลองลากเลือกข้อความแล้วคัดลอกเอง)');
-          }}
-          myReaction={menuFor.reactions?.find((g) => g.users.some((u) => u.id === me.user.id))?.emoji ?? null}
-          canReact={s.conn === 'open'}
-          onReact={(emoji) => { s.react(menuFor.seq, emoji); setMenuFor(null); }}
-          canForward={menuFor.kind !== 'poll' && (menuFor.kind !== 'form' || me.user.role === 'admin')}
-          onForward={() => { setForwardFor(menuFor); setMenuFor(null); }}
+          onReact={(emoji) => { s.react(menu.m.seq, emoji); setMenu(null); }}
         />
       )}
+      {copyPart && <CopyPartSheet m={copyPart} onClose={() => setCopyPart(null)} />}
 
       {showPoll && (
         <PollSheet onClose={() => setShowPoll(false)} onSend={(q, poll) => {
@@ -649,41 +679,107 @@ function previewText(m: ChatMessage): string {
 
 const UNSEND_MS = 24 * 3600_000; // ต้องตรงกับ UNSEND_WINDOW_MS ใน worker/room.ts (เซิร์ฟเวอร์ตรวจซ้ำเสมอ)
 
-function MessageMenu({
-  m, canReply, canPin, isPinned, canUnsend, canModerate, onDelete, onClose, onReply, onPin, onUnpin, onCopy,
-  myReaction, canReact, onReact, canForward, onForward,
+type MenuAction = 'copy' | 'copyPart' | 'keep' | 'hide' | 'unsend' | 'adminDelete' | 'reply' | 'forward' | 'note' | 'pin' | 'announce' | 'unpin';
+
+// ไอคอนเส้นแบบเรียบ (วาดเอง) — ขนาด 26px สีตามตัวอักษร
+const I = (d: string) => (
+  <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={d} /></svg>
+);
+const ICONS: Record<MenuAction, ReactElement> = {
+  copy: I('M8 8h11v12H8zM5 16V4h11'),
+  copyPart: I('M4 7h16M4 12h10M4 17h7M17 14v6M14 17h6'),
+  keep: I('M6 3h12v18l-6-4-6 4z'),
+  hide: I('M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6'),
+  unsend: I('M4 12a8 8 0 1 0 3-6.2M4 4v4h4M9 10l6 6M15 10l-6 6'),
+  adminDelete: I('M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M12 4v0'),
+  reply: I('M10 6L4 12l6 6M4 12h10a6 6 0 0 1 6 6'),
+  forward: I('M12 3v12M7 8l5-5 5 5M5 14v6h14v-6'),
+  note: I('M6 3h9l3 3v15H6zM9 10h6M9 14h6M9 18h4'),
+  pin: I('M9 3h6l-1 6 4 4H6l4-4zM12 13v8'),
+  announce: I('M4 10v4h3l7 4V6l-7 4zM17 9a4 4 0 0 1 0 6'),
+  unpin: I('M9 3h6l-1 6 4 4H6l4-4zM12 13v8M4 4l16 16'),
+};
+
+/** เมนูกดค้างแบบ LINE: กล่องตารางไอคอนติดกับข้อความ + แถบอีโมจิ (ผู้ใช้เลือกใช้อีโมจิ 6 ตัว — ไม่ใช้ตัวการ์ตูนของ LINE) */
+function MessagePopup({
+  m, rect, canReply, canPin, isPinned, canUnsend, canModerate, canNote, canForward, myReaction, canReact, onClose, onAction, onReact,
 }: {
-  m: ChatMessage; canReply: boolean; canPin: boolean; isPinned: boolean; canUnsend: boolean; canModerate: boolean;
-  onDelete: (asAdmin: boolean) => void; onClose: () => void;
-  onReply: () => void; onPin: (notifyAll: boolean) => void; onUnpin: () => void; onCopy: () => void;
-  myReaction: string | null; canReact: boolean; onReact: (emoji: string | null) => void;
-  canForward: boolean; onForward: () => void;
+  m: ChatMessage; rect: DOMRect; canReply: boolean; canPin: boolean; isPinned: boolean; canUnsend: boolean; canModerate: boolean;
+  canNote: boolean; canForward: boolean; myReaction: string | null; canReact: boolean;
+  onClose: () => void; onAction: (a: MenuAction) => void; onReact: (emoji: string | null) => void;
 }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const hasText = !!m.body && !m.deleted;
+  const items: { a: MenuAction; label: string; danger?: boolean }[] = [
+    ...(hasText ? [{ a: 'copy' as const, label: 'คัดลอกทั้งหมด' }, { a: 'copyPart' as const, label: 'คัดลอกบางส่วน' }] : []),
+    ...(!m.deleted ? [{ a: 'keep' as const, label: 'Keep' }] : []),
+    { a: 'hide', label: 'ลบ', danger: true },
+    ...(canUnsend ? [{ a: 'unsend' as const, label: 'ยกเลิกข้อความ', danger: true }] : []),
+    ...(!canUnsend && canModerate ? [{ a: 'adminDelete' as const, label: 'ลบ (แอดมิน)', danger: true }] : []),
+    ...(canReply ? [{ a: 'reply' as const, label: 'ตอบกลับ' }] : []),
+    ...(canForward ? [{ a: 'forward' as const, label: 'ส่งต่อ' }] : []),
+    ...(canNote ? [{ a: 'note' as const, label: 'โน้ต' }] : []),
+    ...(canPin && !isPinned ? [{ a: 'pin' as const, label: 'ปักหมุด' }, { a: 'announce' as const, label: 'ประกาศ' }] : []),
+    ...(canPin && isPinned ? [{ a: 'unpin' as const, label: 'เลิกปักหมุด' }] : []),
+  ];
+
+  // วางกล่องใต้ข้อความ ถ้าที่ไม่พอวางเหนือ ถ้ายังไม่พอวางกลางจอ
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const h = box.offsetHeight, w = box.offsetWidth, vh = window.innerHeight, vw = window.innerWidth;
+    let top = rect.bottom + 8;
+    if (top + h > vh - 8) top = rect.top - h - 8;
+    if (top < 8) top = Math.max(8, (vh - h) / 2);
+    const left = Math.min(Math.max(8, rect.left + rect.width / 2 - w / 2), vw - w - 8);
+    setPos({ top, left });
+  }, [rect]);
+
+  return (
+    <div className="popup-backdrop" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }}>
+      <div ref={boxRef} className="msg-popup" style={pos ? { top: pos.top, left: pos.left } : { visibility: 'hidden' }}
+        onClick={(e) => e.stopPropagation()} role="menu" aria-label="ตัวเลือกข้อความ">
+        <div className="msg-popup-grid">
+          {items.map((it) => (
+            <button key={it.a} role="menuitem" className={it.danger ? 'danger' : ''} onClick={() => onAction(it.a)}>
+              {ICONS[it.a]}<span>{it.label}</span>
+            </button>
+          ))}
+        </div>
+        {!m.deleted && (
+          <div className="msg-popup-react" role="group" aria-label="กดรีแอคชัน">
+            {REACTIONS.map((e) => (
+              <button key={e} className={e === myReaction ? 'on' : ''} disabled={!canReact} aria-pressed={e === myReaction}
+                onClick={() => onReact(e === myReaction ? null : e)}>{e}</button>
+            ))}
+          </div>
+        )}
+        {!canReact && !m.deleted && <p className="small muted msg-popup-note">ยังไม่ได้เชื่อมต่อกับห้อง — กดรีแอคชันไม่ได้ชั่วคราว</p>}
+      </div>
+    </div>
+  );
+}
+
+/** คัดลอกบางส่วน: เลือกข้อความเองในกล่อง แล้วกดคัดลอก */
+function CopyPartSheet({ m, onClose }: { m: ChatMessage; onClose: () => void }) {
+  const notify = useNotify();
+  const ref = useRef<HTMLTextAreaElement>(null);
+  async function copySelected() {
+    const ta = ref.current;
+    if (!ta) return;
+    const part = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+    if (!part) { notify('warning', 'ยังไม่ได้เลือกข้อความ — ลากเลือกส่วนที่ต้องการก่อน'); return; }
+    if (await copyText(part)) { notify('success', `คัดลอกแล้ว ${part.length.toLocaleString('th-TH')} ตัวอักษร`); onClose(); }
+    else notify('error', 'คัดลอกไม่สำเร็จ — เบราว์เซอร์ไม่อนุญาต ลองกดค้างที่ข้อความที่เลือกแล้วเลือก "คัดลอก" ของเครื่อง');
+  }
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="sheet-head"><b className="ellipsis">{m.senderName}: {previewText(m)}</b><button className="link" onClick={onClose}>ปิด</button></div>
-        <div className="reaction-picker" role="group" aria-label="กดรีแอคชัน">
-          {REACTIONS.map((e) => (
-            <button key={e} className={e === myReaction ? 'on' : ''} disabled={!canReact}
-              onClick={() => onReact(e === myReaction ? null : e)} aria-pressed={e === myReaction}>{e}</button>
-          ))}
-        </div>
-        {!canReact && <p className="small muted">ยังไม่ได้เชื่อมต่อกับห้อง — กดรีแอคชันไม่ได้ชั่วคราว</p>}
-        {canReply && <button className="btn btn-ghost btn-block" onClick={onReply}>↩️ ตอบกลับ</button>}
-        {m.body && <button className="btn btn-ghost btn-block" onClick={onCopy}>📋 คัดลอกข้อความ</button>}
-        {canForward && <button className="btn btn-ghost btn-block" onClick={onForward}>↪️ ส่งต่อ</button>}
-        {canPin && !isPinned && (
-          <>
-            <button className="btn btn-ghost btn-block" onClick={() => onPin(false)}>📌 ปักหมุด (ไม่แจ้งใคร)</button>
-            <button className="btn btn-ghost btn-block" onClick={() => onPin(true)}>📢 ประกาศ (ปักหมุด + แจ้งทุกคนในห้อง)</button>
-          </>
-        )}
-        {canPin && isPinned && <button className="btn btn-ghost btn-block" onClick={onUnpin}>เลิกปักหมุด</button>}
-        {canUnsend && <button className="btn btn-ghost btn-block danger-text" onClick={() => onDelete(false)}>↩︎ ยกเลิกส่ง (ทุกคนจะไม่เห็น)</button>}
-        {!canUnsend && canModerate && (
-          <button className="btn btn-ghost btn-block danger-text" onClick={() => onDelete(true)}>🗑 ลบข้อความนี้ (แอดมิน)</button>
-        )}
+        <div className="sheet-head"><b>คัดลอกบางส่วน</b><button className="link" onClick={onClose}>ปิด</button></div>
+        <p className="small muted">ลากเลือกเฉพาะส่วนที่ต้องการ แล้วกด "คัดลอกส่วนที่เลือก"</p>
+        <textarea ref={ref} readOnly value={m.body} rows={Math.min(12, Math.max(3, m.body.split('\n').length + 1))} className="copy-part" />
+        <button className="btn btn-block" onClick={() => void copySelected()}>คัดลอกส่วนที่เลือก</button>
       </div>
     </div>
   );

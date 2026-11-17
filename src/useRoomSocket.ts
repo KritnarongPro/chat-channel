@@ -228,6 +228,9 @@ export function useRoomSocket(
           case 'poll':
             setMessages((prev) => prev.map((m) => (m.seq === f.seq ? { ...m, poll: f.poll } : m)));
             break;
+          case 'hidden':  // ลบเฉพาะฝั่งฉัน (จากเครื่องนี้หรือเครื่องอื่นของเรา)
+            setMessages((prev) => prev.filter((m) => m.seq !== f.seq));
+            break;
           case 'typing':
             setTyping((prev) => new Map(prev).set(f.userId, { name: f.name, until: Date.now() + 5000 }));
             break;
@@ -430,6 +433,11 @@ export function useRoomSocket(
     rawSend({ type: 'typing' });
   }, [rawSend]);
 
+  // ---------- ลบเฉพาะฝั่งฉัน ----------
+  const hide = useCallback((seq: number) => {
+    if (!rawSend({ type: 'hide', seq })) noticeRef.current('error', 'ลบไม่ได้: ยังไม่ได้เชื่อมต่อกับห้อง (เน็ตหลุด?)');
+  }, [rawSend]);
+
   // ---------- โพล ----------
   const sendPoll = useCallback((question: string, poll: PollCreate, extra?: MessageExtra) => {
     const p: PendingMessage = {
@@ -448,6 +456,6 @@ export function useRoomSocket(
   return {
     messages, pending, conn, connError, hasMore, loadingOlder, reads, typing, synced,
     send, sendFile, sendForm, sendSticker, retry, discard, markRead, loadOlder, react, loadUntil,
-    sendTyping, sendPoll, vote, closePoll,
+    sendTyping, sendPoll, vote, closePoll, hide,
   };
 }

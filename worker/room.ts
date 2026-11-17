@@ -9,6 +9,7 @@
 //   4. แจ้งเตือนบนมือถือ (เฟส 3): หาผู้รับ → ใส่งานใน Queue chat-push (ไม่ส่งให้คนที่เปิดห้องนี้อยู่)
 //   6. ฟีเจอร์แชท (2026-11-17): อ่านแล้ว · รีแอคชัน · ค้นหาในห้อง (ส่งต่อ = worker เรียก /post พร้อม forwardedFrom)
 //   7. ฟีเจอร์แชทชุด 2 (2026-11-17): วิดีโอ · อัลบั้ม (extra.albumId) · โพล · กำลังพิมพ์
+//   8. ลบข้อความเฉพาะฝั่งฉัน (2026-11-17, DO v8 hidden_messages) — sync / history / search กรองตาม X-User-Id
 //
 // worker ตรวจล็อกอิน + สิทธิ์สมาชิกห้องก่อนส่งต่อมาที่นี่ แล้วแนบหัว X-User-Id / X-User-Name / X-Room-Id
 // =====================================================================
@@ -25,7 +26,7 @@ import type { PushJob } from './push';
 // =====================================================================
 // 0. โครงตารางในห้อง — ต้องตรงกับ do-schema.sql (check:rules ตรวจเลขเวอร์ชัน)
 // =====================================================================
-export const DO_SCHEMA_VERSION = 7;
+export const DO_SCHEMA_VERSION = 8;
 
 const DO_MIGRATIONS: Record<number, string[]> = {
   1: [
@@ -179,6 +180,15 @@ const DO_MIGRATIONS: Record<number, string[]> = {
        PRIMARY KEY (seq, user_id, option_idx)
      )`,
   ],
+  // v8 (2026-11-17): ลบข้อความเฉพาะฝั่งฉัน (แบบปุ่ม "ลบ" ของ LINE) — คนอื่นยังเห็นครบ
+  8: [
+    `CREATE TABLE IF NOT EXISTS hidden_messages (
+       user_id   TEXT NOT NULL,
+       seq       INTEGER NOT NULL,
+       hidden_at TEXT NOT NULL,
+       PRIMARY KEY (user_id, seq)
+     )`,
+  ],
 };
 
 /** ยกเลิกส่งข้อความของตัวเองได้ภายในเวลานี้ (ผู้ใช้เลือก 24 ชม. แบบ LINE) · แอดมินห้องลบได้ทุกเวลา */
@@ -255,6 +265,8 @@ interface SocketInfo { userId: string; userName: string; visible: boolean; clear
 const canSeeReads = (i: SocketInfo) => i.roomType !== 'channel' || i.role === 'owner' || i.role === 'admin';
 
 const SEARCH_LIMIT = 50;
+/** เงื่อนไข SQL: ไม่เอาข้อความที่คนนี้ลบฝั่งตัวเอง (bind user_id ต่อท้าย) */
+const NOT_HIDDEN = `seq NOT IN (SELECT seq FROM hidden_messages WHERE user_id = ?)`;
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -332,8 +344,9 @@ export class ChatRoom extends DurableObject<Env> {
       if (!Number.isFinite(before) || !Number.isFinite(limit) || limit < 1) {
         return json({ ok: false, error: { code: 'BAD_QUERY', message: 'ค่า before/limit ไม่ถูกต้อง' } }, 400);
       }
+      const viewer = req.headers.get('X-User-Id') ?? '';  // ลบเฉพาะฝั่งฉัน: worker แนบมาเสมอ (BUGS-19)
       const rows = this.sql.exec<MsgRow>(
-        `SELECT * FROM messages WHERE seq < ? AND seq > ? ORDER BY seq DESC LIMIT ?`, before, after, limit + 1,
+        `SELECT * FROM messages WHERE seq < ? AND seq > ? AND ${NOT_HIDDEN} ORDER BY seq DESC LIMIT ?`, before, after, viewer, limit + 1,
       ).toArray();
       const hasMore = rows.length > limit;
       const messages = this.withExtras(rows.slice(0, limit).reverse().map(msgOut));
@@ -361,8 +374,9 @@ export class ChatRoom extends DurableObject<Env> {
       const needle = q.toLowerCase();  // lower() ของ SQLite แปลงแค่ A–Z (ภาษาไทยไม่มีตัวพิมพ์ใหญ่เล็กอยู่แล้ว)
       const rows = this.sql.exec<MsgRow>(
         `SELECT * FROM messages
-         WHERE deleted_at IS NULL AND seq > ? AND (instr(lower(body), ?) > 0 OR instr(lower(COALESCE(file_name, '')), ?) > 0)
-         ORDER BY seq DESC LIMIT ?`, after, needle, needle, SEARCH_LIMIT + 1,
+         WHERE deleted_at IS NULL AND seq > ? AND ${NOT_HIDDEN}
+           AND (instr(lower(body), ?) > 0 OR instr(lower(COALESCE(file_name, '')), ?) > 0)
+         ORDER BY seq DESC LIMIT ?`, after, req.headers.get('X-User-Id') ?? '', needle, needle, SEARCH_LIMIT + 1,
       ).toArray();
       return json({ ok: true, data: { messages: rows.slice(0, SEARCH_LIMIT).map(msgOut), more: rows.length > SEARCH_LIMIT } });
     }
@@ -493,7 +507,7 @@ export class ChatRoom extends DurableObject<Env> {
         this.send(ws, { type: 'pong' });
         return;
       case 'sync':
-        this.handleSync(ws, frame.afterSeq, info.clearedSeq ?? 0);
+        this.handleSync(ws, frame.afterSeq, info.clearedSeq ?? 0, info.userId);
         if (canSeeReads(info)) await this.sendReads(ws, info);
         return;
       case 'react':
@@ -507,6 +521,9 @@ export class ChatRoom extends DurableObject<Env> {
         return;
       case 'poll_close':
         await this.handlePollClose(ws, info, frame.seq);
+        return;
+      case 'hide':
+        this.handleHide(ws, info, frame.seq);
         return;
       case 'read':
         await this.handleRead(ws, info, frame.seq);
@@ -534,7 +551,7 @@ export class ChatRoom extends DurableObject<Env> {
     console.error('WebSocket ผิดพลาด', err);
   }
 
-  private handleSync(ws: WebSocket, afterSeq: number, clearedSeq = 0) {
+  private handleSync(ws: WebSocket, afterSeq: number, clearedSeq: number, userId: string) {
     if (!Number.isInteger(afterSeq) || afterSeq < 0) {
       this.send(ws, { type: 'error', code: 'BAD_SYNC', message: 'ค่าลำดับข้อความสำหรับดึงข้อมูลไม่ถูกต้อง' });
       return;
@@ -543,14 +560,14 @@ export class ChatRoom extends DurableObject<Env> {
     if (afterSeq === 0) {
       // เปิดห้องครั้งแรก → เอาข้อความล่าสุดชุดเดียว (ไม่รวมข้อความที่คนนี้ล้างแชทไปแล้ว)
       rows = this.sql.exec<MsgRow>(
-        `SELECT * FROM messages WHERE seq > ? ORDER BY seq DESC LIMIT ?`, clearedSeq, HISTORY_LIMIT,
+        `SELECT * FROM messages WHERE seq > ? AND ${NOT_HIDDEN} ORDER BY seq DESC LIMIT ?`, clearedSeq, userId, HISTORY_LIMIT,
       ).toArray().reverse();
-      const total = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE seq > ?`, clearedSeq).one().n;
+      const total = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE seq > ? AND ${NOT_HIDDEN}`, clearedSeq, userId).one().n;
       this.send(ws, { type: 'sync', messages: this.withExtras(rows.map(msgOut)), hasMore: total > rows.length });
       return;
     }
     rows = this.sql.exec<MsgRow>(
-      `SELECT * FROM messages WHERE seq > ? ORDER BY seq ASC LIMIT ?`, Math.max(afterSeq, clearedSeq), SYNC_LIMIT + 1,
+      `SELECT * FROM messages WHERE seq > ? AND ${NOT_HIDDEN} ORDER BY seq ASC LIMIT ?`, Math.max(afterSeq, clearedSeq), userId, SYNC_LIMIT + 1,
     ).toArray();
     this.send(ws, { type: 'sync', messages: this.withExtras(rows.slice(0, SYNC_LIMIT).map(msgOut)), hasMore: rows.length > SYNC_LIMIT });
   }
@@ -1153,6 +1170,28 @@ export class ChatRoom extends DurableObject<Env> {
       return err('POLL_CLOSE_FAILED', 'ปิดโพลไม่สำเร็จ (ที่เก็บข้อความขัดข้อง) กรุณาลองใหม่');
     }
     this.broadcast({ type: 'poll', seq, poll: this.pollState(seq)! });
+  }
+
+  // =====================================================================
+  // 8. ลบข้อความเฉพาะฝั่งฉัน — ไม่แตะข้อความจริง แค่จำว่าคนนี้ไม่อยากเห็น
+  // =====================================================================
+  private handleHide(ws: WebSocket, info: SocketInfo, seq: unknown) {
+    if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 1) {
+      return this.send(ws, { type: 'error', code: 'BAD_SEQ', message: 'ระบุข้อความที่จะลบไม่ถูกต้อง' });
+    }
+    const row = this.sql.exec<{ seq: number }>(`SELECT seq FROM messages WHERE seq = ?`, seq).toArray()[0];
+    if (!row) return this.send(ws, { type: 'error', code: 'MESSAGE_NOT_FOUND', message: 'ไม่พบข้อความนี้ในห้อง' });
+    try {
+      this.sql.exec(`INSERT OR IGNORE INTO hidden_messages (user_id, seq, hidden_at) VALUES (?, ?, ?)`, info.userId, seq, nowThai());
+    } catch (err) {
+      console.error('บันทึกการลบเฉพาะฝั่งฉันไม่สำเร็จ', err);
+      return this.send(ws, { type: 'error', code: 'HIDE_FAILED', message: 'ลบข้อความไม่สำเร็จ (ที่เก็บข้อความขัดข้อง) กรุณาลองใหม่' });
+    }
+    // ทุกเครื่อง/แท็บของคนนี้ที่เปิดห้องอยู่
+    for (const s of this.ctx.getWebSockets()) {
+      const i = s.deserializeAttachment() as SocketInfo | null;
+      if (i?.userId === info.userId) this.send(s, { type: 'hidden', seq });
+    }
   }
 }
 

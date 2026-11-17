@@ -4,7 +4,7 @@
 // =====================================================================
 
 import { useCallback, useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { Link, useParams, useLocation } from 'react-router';
 import { Room, RoomNote, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 import { useNotify } from '../notice';
@@ -17,8 +17,10 @@ export default function RoomNotesPage() {
   const [room, setRoom] = useState<Room | null>(null);
   const [notes, setNotes] = useState<RoomNote[] | null>(null);
   const [error, setError] = useState('');
-  const [draft, setDraft] = useState('');
-  const [writing, setWriting] = useState(false);
+  // สร้างโน้ตจากข้อความในแชท (เมนูกดค้าง → โน้ต) — ส่งข้อความมาทาง router state ไม่ใส่ใน URL
+  const fromChat = (useLocation().state as { draft?: string } | null)?.draft ?? '';
+  const [draft, setDraft] = useState(fromChat.slice(0, 5000));
+  const [writing, setWriting] = useState(!!fromChat);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {

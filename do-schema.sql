@@ -3,7 +3,7 @@
 -- ตารางพวกนี้ไม่ได้อยู่ใน D1 จึงใช้ migrations/ ของ D1 ไม่ได้
 -- ตัวที่ใช้จริงอยู่ใน worker/room.ts (DO_MIGRATIONS) — ห้องจะอัปเดตตัวเองตอนถูกเปิดครั้งถัดไป
 -- แก้โครง → เพิ่มเวอร์ชันใหม่ใน DO_MIGRATIONS + เลข DO_SCHEMA_VERSION + อัปเดตไฟล์นี้ (check:rules ตรวจเลขให้ตรงกัน)
--- DO_SCHEMA_VERSION: 7
+-- DO_SCHEMA_VERSION: 8
 -- =====================================================================
 
 -- ---------- v1 ----------
@@ -64,4 +64,12 @@ CREATE TABLE poll_votes (
   user_name  TEXT NOT NULL,
   voted_at   TEXT NOT NULL,
   PRIMARY KEY (seq, user_id, option_idx)
+);
+
+-- ---------- v8 (2026-11-17): ลบข้อความเฉพาะฝั่งฉัน (ปุ่ม "ลบ" แบบ LINE) — sync / history / search ไม่ส่งข้อความเหล่านี้ให้คนนั้น ----------
+CREATE TABLE hidden_messages (
+  user_id   TEXT NOT NULL,
+  seq       INTEGER NOT NULL,     -- messages.seq
+  hidden_at TEXT NOT NULL,        -- เวลาไทย
+  PRIMARY KEY (user_id, seq)
 );
