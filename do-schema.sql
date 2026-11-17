@@ -3,7 +3,7 @@
 -- ตารางพวกนี้ไม่ได้อยู่ใน D1 จึงใช้ migrations/ ของ D1 ไม่ได้
 -- ตัวที่ใช้จริงอยู่ใน worker/room.ts (DO_MIGRATIONS) — ห้องจะอัปเดตตัวเองตอนถูกเปิดครั้งถัดไป
 -- แก้โครง → เพิ่มเวอร์ชันใหม่ใน DO_MIGRATIONS + เลข DO_SCHEMA_VERSION + อัปเดตไฟล์นี้ (check:rules ตรวจเลขให้ตรงกัน)
--- DO_SCHEMA_VERSION: 6
+-- DO_SCHEMA_VERSION: 7
 -- =====================================================================
 
 -- ---------- v1 ----------
@@ -19,7 +19,7 @@ CREATE TABLE messages (
   id               TEXT NOT NULL UNIQUE,
   sender_id        TEXT NOT NULL,
   sender_name      TEXT NOT NULL,
-  kind             TEXT NOT NULL CHECK (kind IN ('text', 'image', 'file', 'voice', 'form', 'sticker')),
+  kind             TEXT NOT NULL CHECK (kind IN ('text', 'image', 'file', 'voice', 'form', 'sticker', 'video', 'poll')),
   body             TEXT NOT NULL,
   created_at       TEXT NOT NULL,
   file_id          TEXT,
@@ -44,4 +44,24 @@ CREATE TABLE reactions (
   emoji      TEXT NOT NULL,
   created_at TEXT NOT NULL,      -- เวลาไทย ISO
   PRIMARY KEY (seq, user_id)
+);
+
+-- ---------- v7 (2026-11-17): messages.kind เพิ่ม 'video' / 'poll' (สร้างตารางใหม่แล้วย้ายข้อมูล — CHECK ข้างบนเป็นของ v7 แล้ว) ----------
+-- ข้อความ poll: body = คำถาม · ตัวเลือก/คะแนนอยู่ในตารางด้านล่าง · ลบข้อความ → ลบโพล + โหวตด้วย
+-- extra.albumId (รูป/วิดีโอที่ส่งพร้อมกัน — หน้าเว็บรวมเป็นตาราง)
+CREATE TABLE polls (
+  seq        INTEGER PRIMARY KEY,  -- messages.seq
+  options    TEXT NOT NULL,        -- JSON ["ตัวเลือก 1", …] (2–10 ข้อ)
+  multi      INTEGER NOT NULL DEFAULT 0,
+  closes_at  TEXT,                 -- เวลาไทย (NULL = ไม่มีกำหนด)
+  closed_at  TEXT,                 -- ปิดก่อนเวลา (คนสร้าง / เจ้าของ-แอดมินห้อง)
+  created_by TEXT NOT NULL
+);
+CREATE TABLE poll_votes (
+  seq        INTEGER NOT NULL,
+  option_idx INTEGER NOT NULL,     -- ลำดับตัวเลือก (เริ่ม 0)
+  user_id    TEXT NOT NULL,
+  user_name  TEXT NOT NULL,
+  voted_at   TEXT NOT NULL,
+  PRIMARY KEY (seq, user_id, option_idx)
 );

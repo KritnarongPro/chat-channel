@@ -58,7 +58,10 @@ if (!latest || latest[1] !== migs[migs.length - 1]) {
 }
 for (const f of migs) {
   const sql = read(join('migrations', f)).toLowerCase();
+  // ตารางชั่วคราวที่ถูกเปลี่ยนชื่อในไฟล์เดียวกัน (สร้างใหม่ → ย้ายข้อมูล → RENAME) ตรวจด้วยชื่อใหม่แทน
+  const renamed = new Set([...sql.matchAll(/alter table (\w+) rename to \w+/g)].map((r) => r[1]));
   for (const m of sql.matchAll(/create table (?:if not exists )?(\w+)/g)) {
+    if (renamed.has(m[1])) continue;
     if (!new RegExp(`create table (if not exists )?${m[1]}\\b`).test(schema)) fail('CORE-03', `ตาราง ${m[1]} (จาก ${f}) ไม่อยู่ใน schema.sql`);
   }
   for (const m of sql.matchAll(/alter table (\w+) add column (\w+)/g)) {
@@ -249,10 +252,25 @@ for (const f of walk('worker', ['.ts'])) {
   if (/forwardedFrom|frame\.forwarded/.test(post)) fail('BUGS-17', 'WebSocket send ห้ามส่ง forwardedFrom เข้า handleSend (ป้าย "ส่งต่อจาก" มาจาก worker เท่านั้น)');
 }
 
+// ---------- BUGS-18 ชุด 2: ตัวอย่างลิงก์ห้ามถูกใช้ยิงเครื่องภายใน (SSRF) + โหวต/ปักหมุดตรวจที่เซิร์ฟเวอร์ (กันไว้ก่อน 2026-11-17) ----------
+{
+  const lp = read(join('worker', 'link-preview.ts'));
+  const sf = lp.slice(lp.indexOf('async function safeFetch'), lp.indexOf('async function readLimited'));
+  if (!/for \(let hop/.test(sf) || !/unsafeUrlReason\(current\)/.test(sf)) fail('BUGS-18', 'safeFetch ต้องตรวจ unsafeUrlReason ทุกครั้งที่ redirect (ในลูป hop)');
+  if (!/redirect: 'manual'/.test(sf)) fail('BUGS-18', "safeFetch ต้องใช้ redirect: 'manual' (ไม่ให้ fetch ตามไปเองโดยไม่ตรวจ)");
+  const img = lp.slice(lp.indexOf('export async function linkPreviewImage'));
+  if (!/SELECT image_url FROM link_previews/.test(img) || /safeFetch\(url/.test(img)) fail('BUGS-18', 'linkPreviewImage ต้องเปิดเฉพาะรูปที่บันทึกไว้ใน link_previews (ห้าม fetch url ที่ส่งมาตรง ๆ = กลายเป็น proxy)');
+  const vote = room.slice(room.indexOf('private async handleVote'), room.indexOf('private async handlePollClose'));
+  if (!/checkPoster\(/.test(vote)) fail('BUGS-18', 'handleVote ต้องเรียก checkPoster (สมาชิกที่ถูกเอาออกระหว่างเปิดห้องค้างต้องโหวตไม่ได้)');
+  const idx = read(join('worker', 'index.ts'));
+  const pin = idx.slice(idx.indexOf('async function pinMessage'), idx.indexOf('async function unpinMessage'));
+  if (!/COUNT\(\*\) FROM room_pins WHERE room_id = \?1\) < \?7/.test(pin)) fail('BUGS-18', 'pinMessage ต้องนับ + เพิ่มหมุดในคำสั่งเดียว (กันกดพร้อมกันแล้วเกิน 5)');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..07, BUGS-01..17)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..07, BUGS-01..18)');

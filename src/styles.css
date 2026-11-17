@@ -258,3 +258,42 @@ button.read-mark { padding: 0; border: 0; background: none; cursor: pointer; tex
 .search-results mark { background: #fde68a; color: #111; border-radius: 2px; }
 .forward-pick { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .bubble { -webkit-touch-callout: none; }
+
+/* ---------- ชุด 2 (2026-11-17): วิดีโอ · อัลบั้ม · โพล · กำลังพิมพ์ · ตัวอย่างลิงก์ · ประกาศ ---------- */
+.msg-video { display: block; max-width: min(280px, 100%); max-height: 360px; width: auto; height: auto; border-radius: 10px; background: #000; }
+.bubble-album { padding: 4px; max-width: min(320px, 80vw); }
+.album-grid { display: grid; gap: 2px; border-radius: 10px; overflow: hidden; }
+.album-grid.n2 { grid-template-columns: 1fr 1fr; }
+.album-grid.n3, .album-grid.n4 { grid-template-columns: 1fr 1fr; }
+.album-grid.n3 .album-tile:first-child { grid-column: span 2; }
+.album-tile { position: relative; aspect-ratio: 1 / 1; background: var(--bg); overflow: hidden; }
+.album-tile.flash { outline: 3px solid #fbbf24; }
+.album-tile img, .album-tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.album-video { width: 100%; height: 100%; position: relative; }
+.album-dur { position: absolute; right: 4px; bottom: 4px; background: rgba(0,0,0,.6); color: #fff; font-size: 11px; padding: 0 4px; border-radius: 4px; pointer-events: none; }
+.album-react { position: absolute; left: 4px; bottom: 4px; border: 0; border-radius: 999px; background: rgba(255,255,255,.9); color: #111; font-size: 12px; padding: 0 6px; cursor: pointer; }
+.album-missing { display: flex; align-items: center; justify-content: center; height: 100%; padding: 4px; text-align: center; }
+.poll-card { display: flex; flex-direction: column; gap: 6px; min-width: 220px; }
+.poll-q { font-size: var(--chat-font); }
+.poll-opt { position: relative; display: flex; justify-content: space-between; align-items: center; width: 100%; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); padding: 8px 10px; font: inherit; cursor: pointer; overflow: hidden; text-align: left; }
+.poll-opt.on { border-color: var(--blue); }
+.poll-opt:disabled { cursor: default; }
+.poll-bar { position: absolute; left: 0; top: 0; bottom: 0; background: var(--blue-soft); z-index: 0; transition: width .3s; }
+.poll-label, .poll-count { position: relative; z-index: 1; }
+.poll-count { font-weight: 600; margin-left: 8px; }
+.poll-names { padding: 2px 4px 0; }
+.poll-actions { display: flex; gap: 12px; }
+.poll-edit-row { display: flex; gap: 6px; align-items: center; }
+.poll-edit-row input { flex: 1; }
+.row-check { display: flex; gap: 8px; align-items: center; }
+.typing-line { padding: 2px 12px; font-style: italic; }
+.link-preview { display: flex; flex-direction: column; margin-top: 6px; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; color: inherit; text-decoration: none; background: var(--surface); max-width: 300px; }
+.link-preview img { width: 100%; max-height: 160px; object-fit: cover; display: block; }
+.link-preview-text { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; }
+.link-preview-text b { font-size: 14px; }
+.link-preview-fail { margin-top: 4px; font-style: italic; }
+.bubble-body a { color: var(--blue); word-break: break-all; }
+.pin-item { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); }
+.pin-item > button:first-child { flex: 1; min-width: 0; border-bottom: 0; }
+.search-results .pin-item > .link { width: auto; flex: none; white-space: nowrap; border-bottom: 0; padding: 8px; }
+.row-check input { width: auto; flex: none; }

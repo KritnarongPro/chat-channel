@@ -10,6 +10,7 @@
 //                notify (ระบบแจ้งเตือนแบบ Telegram: ปิดเสียงมีเวลา, ตั้งค่ารวม, ปักหมุด, แอปเปิดอยู่, บอทแจ้งเตือน)
 //                เฟส 5: prefs (ธีม/ตัวอักษร) / friends (เพื่อน) / stickers / notes (โน้ตในห้อง + ส่วนตัว)
 //                ฟีเจอร์แชท (2026-11-17): ค้นหาในห้อง / ส่งต่อข้อความ (อ่านแล้ว + รีแอคชัน อยู่ในห้องแชท room.ts)
+//                ฟีเจอร์แชทชุด 2 (2026-11-17): ปักหมุด/ประกาศหลายอัน (room_pins) / ตัวอย่างลิงก์ (link-preview.ts) / วิดีโอ
 //   3. ตัวช่วยเรื่องห้อง (ตรวจสมาชิก, สิทธิ์โพสต์)
 //   4. Entry point (fetch + scheduled: ลบไฟล์ครบ 180 วัน + queue: ส่งแจ้งเตือน)
 //
@@ -19,7 +20,7 @@
 
 import { nowThai } from '../shared/time';
 import {
-  FILE_RETENTION_DAYS, FileKind, HISTORY_LIMIT, IMAGE_MIMES, MAX_BYTES, MAX_VOICE_SECONDS, VOICE_MIMES,
+  FILE_RETENTION_DAYS, FileKind, HISTORY_LIMIT, IMAGE_MIMES, MAX_BYTES, MAX_VOICE_SECONDS, VIDEO_MIMES, VOICE_MIMES,
 } from '../shared/protocol';
 import { thaiAfter } from '../shared/time';
 import { cleanupFiles } from './cleanup';
@@ -32,6 +33,7 @@ import { FormField, OrderStatus, ORDER_STATUS_TH, checkFormDef, checkSubmission 
 import { lineCallback, lineConfigError, lineStart } from './auth-line';
 import { googleCallback, googleConfigError, googleStart } from './auth-google';
 import { InviteRow, inviteProblem, loadInvite, redeemInvite } from './invites';
+import { linkPreview, linkPreviewImage } from './link-preview';
 
 export { ChatRoom } from './room';
 export { UserHub } from './hub';
@@ -81,7 +83,8 @@ const routes: Route[] = [
   { method: 'GET',  pattern: '/api/rooms/:id',                need: 'active', handler: getRoom },
   { method: 'POST', pattern: '/api/rooms/:id/members',        need: 'active', handler: addMembers },
   { method: 'POST', pattern: '/api/rooms/:id/mute',           need: 'active', handler: setMute },
-  { method: 'POST', pattern: '/api/rooms/:id/pin',            need: 'active', handler: pinMessage },
+  { method: 'POST', pattern: '/api/rooms/:id/pin',            need: 'active', handler: pinMessage },    // ปักหมุด/ประกาศ (สูงสุด 5)
+  { method: 'POST', pattern: '/api/rooms/:id/unpin',          need: 'active', handler: unpinMessage },
   { method: 'POST', pattern: '/api/rooms/:id/title',          need: 'active', handler: renameRoom },
 
   // ---------- notify: ตั้งค่าแจ้งเตือนรวม + การเชื่อมต่อของแอป (แจ้งเตือนในแอป) ----------
@@ -105,6 +108,9 @@ const routes: Route[] = [
   // ---------- ฟีเจอร์แชท (2026-11-17): ค้นหาในห้องที่เปิดอยู่ · ส่งต่อ (ขึ้น "ส่งต่อจาก ชื่อ") ----------
   { method: 'GET',  pattern: '/api/rooms/:id/search',         need: 'active', handler: searchMessages },
   { method: 'POST', pattern: '/api/rooms/:id/messages/:seq/forward', need: 'active', handler: forwardMessage },
+  // ---------- ตัวอย่างลิงก์ (2026-11-17): หัวข้อ + รูปผ่านเซิร์ฟเวอร์เรา (เว็บต้นทางไม่เห็น IP ผู้ใช้) ----------
+  { method: 'GET',  pattern: '/api/link-preview',             need: 'active', handler: (c) => linkPreview(c.env, c.url.searchParams.get('url')) },
+  { method: 'GET',  pattern: '/api/link-preview/image',       need: 'active', handler: (c) => linkPreviewImage(c.env, c.url.searchParams.get('url')) },
 
   // ---------- files (รูป / ไฟล์ / เสียง — ตัวไฟล์อยู่ใน R2 เปิดได้เฉพาะสมาชิกห้อง) ----------
   { method: 'POST', pattern: '/api/rooms/:id/files',          need: 'active', handler: uploadFile },
@@ -422,7 +428,6 @@ function roomOut(r: RoomListRow) {
     // ปิดเสียงอยู่ไหม: ปิดตลอด หรือยังไม่ถึงเวลาเปิดเสียงเอง
     muted: r.muted === 1 && (r.muted_until === null || r.muted_until > nowThai()),
     mutedUntil: r.muted === 1 ? r.muted_until : null,
-    pinned: r.pinned_seq ? { seq: r.pinned_seq, text: r.pinned_text, sender: r.pinned_sender, at: r.pinned_at } : null,
     visibility: r.visibility,
     description: r.description,
     canPost: r.type !== 'channel' || r.my_role === 'owner' || r.my_role === 'admin',
@@ -527,8 +532,12 @@ async function getRoom(c: Ctx) {
        WHERE m.room_id = ? ORDER BY m.role = 'owner' DESC, u.display_name`,
     ).bind(c.params.id).all<{ id: string; display_name: string; picture_url: string | null; is_bot: number; role: string }>(),
   );
+  const pins = await db('อ่านข้อความที่ปักหมุด', () =>
+    c.env.DB.prepare(`SELECT seq, text, sender, pinned_at FROM room_pins WHERE room_id = ? ORDER BY pinned_at DESC`)
+      .bind(c.params.id).all<{ seq: number; text: string; sender: string | null; pinned_at: string }>(),
+  );
   return ok({
-    room: roomOut(room),
+    room: { ...roomOut(room), pins: pins.results.map((p) => ({ seq: p.seq, text: p.text, sender: p.sender, at: p.pinned_at })) },
     members: members.results.map((m) => ({ id: m.id, displayName: m.display_name, pictureUrl: m.picture_url, role: m.role, isBot: m.is_bot === 1 })),
   });
 }
@@ -613,41 +622,72 @@ async function openHub(c: Ctx) {
 }
 
 /** ปักหมุด: { seq, notify } · เลิกปักหมุด: { seq: null } — กลุ่ม/ชาเนล เฉพาะเจ้าของ/แอดมินห้อง · แชท 1:1 ทั้งสองคน */
-async function pinMessage(c: Ctx) {
+// ---------- ปักหมุด/ประกาศ (2026-11-17: ผู้ใช้เลือกปักได้หลายอัน สูงสุด 5) — แชท 1:1 ทั้งสองคน · กลุ่ม/ชาเนล เจ้าของ/แอดมิน ----------
+const PIN_MAX = 5;
+
+async function requirePinner(c: Ctx) {
   const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
   if (room.type !== 'dm' && role !== 'owner' && role !== 'admin') {
     throw new ApiError(403, 'NOT_ROOM_ADMIN', 'เฉพาะเจ้าของ/แอดมินของห้องเท่านั้นที่ปักหมุดได้');
   }
+  return room;
+}
+
+/** บอกคนที่เปิดห้องอยู่ให้โหลดแถบปักหมุดใหม่ (ไม่สำเร็จไม่เป็นไร — เปิดห้องใหม่ก็เห็น) */
+async function broadcastRoomUpdate(env: Env, roomId: string) {
+  try {
+    await roomStub(env, roomId).fetch(new Request('https://room/broadcast', { method: 'POST', headers: { 'X-Room-Id': roomId } }));
+  } catch (err) {
+    console.error('แจ้งอัปเดตห้องให้คนที่เปิดอยู่ไม่สำเร็จ', err);
+  }
+}
+
+async function pinMessage(c: Ctx) {
+  await requirePinner(c);
   const body = await readJson<{ seq?: unknown; notify?: unknown }>(c.req);
-  const stub = roomStub(c.env, c.params.id);
-  const now = nowThai();
-  if (body.seq === null) {
-    await db('เลิกปักหมุด', () =>
-      c.env.DB.prepare(`UPDATE rooms SET pinned_seq = NULL, pinned_text = NULL, pinned_sender = NULL, pinned_by = NULL, pinned_at = NULL WHERE id = ?`)
-        .bind(c.params.id).run(),
-    );
-  } else {
-    if (typeof body.seq !== 'number' || !Number.isInteger(body.seq)) throw new ApiError(400, 'BAD_SEQ', 'ระบุข้อความที่จะปักหมุดไม่ถูกต้อง');
-    const res = await stub.fetch(new Request(`https://room/message?seq=${body.seq}`, { headers: { 'X-Room-Id': c.params.id } }));
-    const j = (await res.json()) as { ok: boolean; data?: { message: { senderName: string; deleted?: unknown }; preview: string }; error?: { code: string; message: string } };
-    if (!j.ok || !j.data) throw new ApiError(404, j.error?.code ?? 'MESSAGE_NOT_FOUND', j.error?.message ?? 'ไม่พบข้อความนี้');
-    if (j.data.message.deleted) throw new ApiError(400, 'MESSAGE_DELETED', 'ข้อความนี้ถูกลบแล้ว ปักหมุดไม่ได้');
-    await db('ปักหมุดข้อความ', () =>
-      c.env.DB.prepare(`UPDATE rooms SET pinned_seq = ?, pinned_text = ?, pinned_sender = ?, pinned_by = ?, pinned_at = ? WHERE id = ?`)
-        .bind(body.seq, j.data!.preview.slice(0, 300), j.data!.message.senderName, c.user!.id, now, c.params.id).run(),
-    );
-    // เลือกแจ้งทุกคน → โพสต์ข้อความ "ปักหมุด" (คนในห้องได้แจ้งเตือนตามปกติ)
-    if (body.notify === true) {
-      await postToRoom(c.env, c.params.id, c.user!, { kind: 'text', body: `📌 ปักหมุด: ${j.data.preview.slice(0, 200)}` });
+  if (typeof body.seq !== 'number' || !Number.isInteger(body.seq)) throw new ApiError(400, 'BAD_SEQ', 'ระบุข้อความที่จะปักหมุดไม่ถูกต้อง');
+  const seq = body.seq;
+  const res = await roomStub(c.env, c.params.id).fetch(new Request(`https://room/message?seq=${seq}`, { headers: { 'X-Room-Id': c.params.id } }));
+  const j = (await res.json()) as { ok: boolean; data?: { message: { senderName: string; deleted?: unknown }; preview: string }; error?: { code: string; message: string } };
+  if (!j.ok || !j.data) throw new ApiError(404, j.error?.code ?? 'MESSAGE_NOT_FOUND', j.error?.message ?? 'ไม่พบข้อความนี้');
+  if (j.data.message.deleted) throw new ApiError(400, 'MESSAGE_DELETED', 'ข้อความนี้ถูกลบแล้ว ปักหมุดไม่ได้');
+  // นับ + เพิ่มในคำสั่งเดียว (กันสองคนกดพร้อมกันแล้วเกิน 5)
+  const r = await db('ปักหมุดข้อความ', () =>
+    c.env.DB.prepare(
+      `INSERT INTO room_pins (room_id, seq, text, sender, pinned_by, pinned_at)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6
+       WHERE (SELECT COUNT(*) FROM room_pins WHERE room_id = ?1) < ?7
+         AND NOT EXISTS (SELECT 1 FROM room_pins WHERE room_id = ?1 AND seq = ?2)`,
+    ).bind(c.params.id, seq, j.data!.preview.slice(0, 300), j.data!.message.senderName, c.user!.id, nowThai(), PIN_MAX).run(),
+  );
+  if (r.meta.changes !== 1) {
+    const dup = await c.env.DB.prepare(`SELECT 1 FROM room_pins WHERE room_id = ? AND seq = ?`).bind(c.params.id, seq).first();
+    if (dup) throw new ApiError(409, 'ALREADY_PINNED', 'ข้อความนี้ปักหมุดอยู่แล้ว');
+    throw new ApiError(409, 'PIN_LIMIT', `ปักหมุดได้สูงสุด ${PIN_MAX} ข้อความ — เลิกปักอันเก่าก่อน`);
+  }
+  const warnings: string[] = [];
+  // เลือกแจ้งทุกคน → โพสต์ข้อความประกาศ (คนในห้องได้แจ้งเตือนตามปกติ)
+  if (body.notify === true) {
+    try {
+      await postToRoom(c.env, c.params.id, c.user!, { kind: 'text', body: `📌 ประกาศ: ${j.data.preview.slice(0, 200)}` });
+    } catch (err) {
+      warnings.push(`ปักหมุดแล้ว แต่ส่งข้อความแจ้งทุกคนไม่สำเร็จ: ${err instanceof ApiError ? err.message : 'ระบบขัดข้อง'}`);
     }
   }
-  // บอกคนที่เปิดห้องอยู่ให้โหลดแถบปักหมุดใหม่ (ไม่สำเร็จไม่เป็นไร — เปิดห้องใหม่ก็เห็น)
-  try {
-    await stub.fetch(new Request('https://room/broadcast', { method: 'POST', headers: { 'X-Room-Id': c.params.id } }));
-  } catch (err) {
-    console.error('แจ้งอัปเดตปักหมุดให้คนในห้องไม่สำเร็จ', err);
-  }
-  return ok({ pinned: body.seq ?? null });
+  await broadcastRoomUpdate(c.env, c.params.id);
+  return ok({ pinned: seq, warnings });
+}
+
+async function unpinMessage(c: Ctx) {
+  await requirePinner(c);
+  const body = await readJson<{ seq?: unknown }>(c.req);
+  if (typeof body.seq !== 'number' || !Number.isInteger(body.seq)) throw new ApiError(400, 'BAD_SEQ', 'ระบุข้อความที่จะเลิกปักหมุดไม่ถูกต้อง');
+  const r = await db('เลิกปักหมุด', () =>
+    c.env.DB.prepare(`DELETE FROM room_pins WHERE room_id = ? AND seq = ?`).bind(c.params.id, body.seq).run(),
+  );
+  if (r.meta.changes !== 1) throw new ApiError(404, 'NOT_PINNED', 'ข้อความนี้ไม่ได้ปักหมุดอยู่');
+  await broadcastRoomUpdate(c.env, c.params.id);
+  return ok({ unpinned: body.seq });
 }
 
 /**
@@ -844,7 +884,7 @@ async function deleteMessage(c: Ctx) {
   const warnings: string[] = [];
   const label = by === 'admin' ? '🚫 ข้อความถูกลบโดยแอดมิน' : '🚫 ข้อความถูกยกเลิก';
   try {
-    const stmts = [c.env.DB.prepare(`UPDATE rooms SET pinned_seq = NULL, pinned_text = NULL, pinned_sender = NULL, pinned_by = NULL, pinned_at = NULL WHERE id = ? AND pinned_seq = ?`).bind(c.params.id, seq)];
+    const stmts = [c.env.DB.prepare(`DELETE FROM room_pins WHERE room_id = ? AND seq = ?`).bind(c.params.id, seq)];
     if (wasLast) stmts.push(c.env.DB.prepare(`UPDATE rooms SET last_message_preview = ? WHERE id = ? AND last_seq = ?`).bind(label, c.params.id, seq));
     await c.env.DB.batch(stmts);
   } catch (err) {
@@ -971,6 +1011,7 @@ async function forwardMessage(c: Ctx) {
   if (!j.ok || !j.data) throw new ApiError(404, j.error?.code ?? 'MESSAGE_NOT_FOUND', j.error?.message ?? 'ไม่พบข้อความนี้');
   const src = j.data.message;
   if (src.deleted) throw new ApiError(400, 'MESSAGE_DELETED', 'ข้อความนี้ถูกลบแล้ว ส่งต่อไม่ได้');
+  if (src.kind === 'poll') throw new ApiError(400, 'POLL_NO_FORWARD', 'โพลส่งต่อไม่ได้ (คะแนนโหวตผูกกับห้องเดิม)');
   if (src.file && src.file.expiresAt <= nowThai()) throw new ApiError(410, 'FILE_EXPIRED', 'ไฟล์ของข้อความนี้หมดอายุแล้ว (เก็บ 180 วัน) ส่งต่อไม่ได้');
 
   const results: { roomId: string; ok: boolean; title?: string; error?: { code: string; message: string } }[] = [];
@@ -1060,8 +1101,8 @@ async function uploadFile(c: Ctx) {
   requirePoster(room.type, role);
   const h = c.req.headers;
   const kind = h.get('X-File-Kind') as FileKind | null;
-  if (kind !== 'image' && kind !== 'file' && kind !== 'voice') {
-    throw new ApiError(400, 'BAD_KIND', 'ชนิดไฟล์ต้องเป็น image, file หรือ voice');
+  if (kind !== 'image' && kind !== 'file' && kind !== 'voice' && kind !== 'video') {
+    throw new ApiError(400, 'BAD_KIND', 'ชนิดไฟล์ต้องเป็น image, file, voice หรือ video');
   }
   const size = Number(h.get('Content-Length'));
   if (!Number.isFinite(size) || size <= 0) throw new ApiError(411, 'NO_LENGTH', 'ไม่ทราบขนาดไฟล์ หรือไฟล์ว่าง');
@@ -1075,13 +1116,16 @@ async function uploadFile(c: Ctx) {
   if (kind === 'voice' && !VOICE_MIMES.includes(mime)) {
     throw new ApiError(415, 'BAD_VOICE_TYPE', `ชนิดไฟล์เสียงไม่รองรับ (${mime})`);
   }
+  if (kind === 'video' && !VIDEO_MIMES.includes(mime)) {
+    throw new ApiError(415, 'BAD_VIDEO_TYPE', `ชนิดวิดีโอไม่รองรับ (${mime}) — รองรับ MP4, MOV, WEBM, 3GP · ชนิดอื่นให้ "ส่งเป็นไฟล์"`);
+  }
   let name: string;
   try {
     name = decodeURIComponent(h.get('X-File-Name') || '').trim();
   } catch {
     throw new ApiError(400, 'BAD_NAME', 'ชื่อไฟล์ไม่ถูกต้อง');
   }
-  if (!name) name = kind === 'voice' ? 'ข้อความเสียง' : kind === 'image' ? 'รูปภาพ' : 'ไฟล์';
+  if (!name) name = kind === 'voice' ? 'ข้อความเสียง' : kind === 'image' ? 'รูปภาพ' : kind === 'video' ? 'วิดีโอ' : 'ไฟล์';
   name = name.replace(/[\\/\r\n\t]/g, '_').slice(0, 200);
   const num = (v: string | null) => (v && /^\d+$/.test(v) ? Number(v) : null);
   const width = num(h.get('X-Width'));

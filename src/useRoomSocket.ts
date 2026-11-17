@@ -9,10 +9,11 @@
 //   - ไฟล์ (เฟส 2): กำลังอัป (%) → กำลังส่ง → ส่งแล้ว · อัปไม่สำเร็จ → "ส่งไม่สำเร็จ + เหตุผล" กดส่งใหม่ = อัปใหม่
 //   - แจ้งเตือน: ส่งแบบเงียบ / ตอบกลับ ผ่าน extra · room_update (เช่น ปักหมุด) → เรียก onRoomUpdate
 //   - ฟีเจอร์แชท (2026-11-17): reads/read = อ่านแล้ว · reactions = รีแอคชัน · loadUntil = โหลดย้อนจนเจอข้อความ (ค้นหา/กระโดด)
+//   - ชุด 2 (2026-11-17): typing = กำลังพิมพ์ (ส่งไม่ถี่กว่า 3 วิ / แสดง 5 วิ) · poll = โพล (โหวต/ปิดโหวต) · วิดีโอ/อัลบั้มผ่าน sendFile
 // =====================================================================
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChatMessage, ClientFrame, FileKind, MessageExtra, ReadState, ServerFrame } from '../shared/protocol';
+import type { ChatMessage, ClientFrame, FileKind, MessageExtra, PollCreate, ReadState, ServerFrame } from '../shared/protocol';
 import { HISTORY_LIMIT, MAX_BYTES, MAX_MESSAGE_CHARS } from '../shared/protocol';
 import { api, errMsg, uploadFile } from './api';
 import { formatSize } from './media';
@@ -31,7 +32,7 @@ export interface OutgoingFile {
 
 export interface PendingMessage {
   clientId: string;
-  kind: 'text' | FileKind | 'form' | 'sticker';
+  kind: ChatMessage['kind'];
   body: string;
   extra?: MessageExtra;   // เฟส 4: การ์ดฟอร์ม { formId } · เฟส 5: สติกเกอร์ { stickerId }
   status: 'uploading' | 'sending' | 'failed';
@@ -63,6 +64,9 @@ export function useRoomSocket(
   const [loadingOlder, setLoadingOlder] = useState(false);
   // อ่านแล้ว: userId → สถานะ (ชาเนลที่ไม่ใช่แอดมิน = ว่างเสมอ)
   const [reads, setReads] = useState<Map<string, ReadState>>(new Map());
+  // กำลังพิมพ์: userId → { ชื่อ, หมดเวลาเมื่อ }
+  const [typing, setTyping] = useState<Map<string, { name: string; until: number }>>(new Map());
+  const lastTypingSent = useRef(0);
 
   const wsRef = useRef<WebSocket | null>(null);
   const lastSeqRef = useRef(0);
@@ -162,7 +166,7 @@ export function useRoomSocket(
         initialSyncRef.current = lastSeqRef.current === 0;
         ws.send(JSON.stringify({ type: 'sync', afterSeq: lastSeqRef.current } satisfies ClientFrame));
         // ข้อความที่ค้าง "กำลังส่ง" ตอนเน็ตหลุด → ส่งอีกรอบ (รหัสเดิม ไม่ซ้ำ)
-        for (const p of pendingRef.current) if (p.status === 'sending' && (p.kind === 'text' || p.kind === 'form' || p.kind === 'sticker' || p.fileId)) transmit(p);
+        for (const p of pendingRef.current) if (p.status === 'sending' && (p.kind === 'text' || p.kind === 'form' || p.kind === 'sticker' || p.kind === 'poll' || p.fileId)) transmit(p);
         pingTimer = window.setInterval(() => rawSend({ type: 'ping' }), PING_MS);
       };
 
@@ -175,7 +179,14 @@ export function useRoomSocket(
           return;
         }
         switch (f.type) {
-          case 'message': merge([f.message]); break;
+          case 'message':
+            merge([f.message]);
+            // คนนี้ส่งแล้ว → เลิกแสดง "กำลังพิมพ์"
+            setTyping((prev) => {
+              if (!prev.has(f.message.senderId)) return prev;
+              const next = new Map(prev); next.delete(f.message.senderId); return next;
+            });
+            break;
           case 'sync':
             if (initialSyncRef.current) {
               // เปิดห้องครั้งแรก: hasMore = ยังมีข้อความเก่ากว่านี้ให้เลื่อนขึ้นดู
@@ -210,6 +221,12 @@ export function useRoomSocket(
             break;
           case 'reactions':
             setMessages((prev) => prev.map((m) => (m.seq === f.seq ? { ...m, reactions: f.reactions } : m)));
+            break;
+          case 'poll':
+            setMessages((prev) => prev.map((m) => (m.seq === f.seq ? { ...m, poll: f.poll } : m)));
+            break;
+          case 'typing':
+            setTyping((prev) => new Map(prev).set(f.userId, { name: f.name, until: Date.now() + 5000 }));
             break;
         }
       };
@@ -311,7 +328,7 @@ export function useRoomSocket(
     const p = pendingRef.current.find((x) => x.clientId === clientId);
     if (!p) return;
     // ไฟล์ที่ยังอัปไม่ผ่าน → อัปใหม่ · อัปแล้ว/ข้อความ → ส่งผ่านห้องอีกรอบ (รหัสเดิม ไม่ซ้ำ)
-    if (p.kind !== 'text' && p.kind !== 'form' && p.kind !== 'sticker' && !p.fileId) { void upload(p); return; }
+    if (p.kind !== 'text' && p.kind !== 'form' && p.kind !== 'sticker' && p.kind !== 'poll' && !p.fileId) { void upload(p); return; }
     const again = { ...p, status: 'sending' as const, reason: undefined };
     setPending((ps) => ps.map((x) => (x.clientId === clientId ? again : x)));
     transmit(again);
@@ -390,8 +407,44 @@ export function useRoomSocket(
     }
   }, [roomId, hasMore, merge]);
 
+  // ---------- กำลังพิมพ์: ลบชื่อที่หมดเวลา (ทุก 1 วิ เมื่อมีคนพิมพ์อยู่) ----------
+  useEffect(() => {
+    if (typing.size === 0) return;
+    const t = window.setInterval(() => {
+      setTyping((prev) => {
+        const now = Date.now();
+        const next = new Map([...prev].filter(([, v]) => v.until > now));
+        return next.size === prev.size ? prev : next;
+      });
+    }, 1000);
+    return () => clearInterval(t);
+  }, [typing.size]);
+  /** เรียกทุกครั้งที่พิมพ์ — ส่งจริงไม่เกินทุก 3 วิ (ห้องกรองซ้ำอีกชั้น) */
+  const sendTyping = useCallback(() => {
+    const now = Date.now();
+    if (now - lastTypingSent.current < 3000) return;
+    lastTypingSent.current = now;
+    rawSend({ type: 'typing' });
+  }, [rawSend]);
+
+  // ---------- โพล ----------
+  const sendPoll = useCallback((question: string, poll: PollCreate, extra?: MessageExtra) => {
+    const p: PendingMessage = {
+      clientId: makeClientId(), kind: 'poll', body: question.trim(), status: 'sending', extra: { ...extra, pollCreate: poll },
+    };
+    setPending((ps) => [...ps, p]);
+    transmit(p);
+  }, [transmit]);
+  const vote = useCallback((seq: number, options: number[]) => {
+    if (!rawSend({ type: 'vote', seq, options })) noticeRef.current('error', 'โหวตไม่ได้: ยังไม่ได้เชื่อมต่อกับห้อง (เน็ตหลุด?)');
+  }, [rawSend]);
+  const closePoll = useCallback((seq: number) => {
+    if (!rawSend({ type: 'poll_close', seq })) noticeRef.current('error', 'ปิดโพลไม่ได้: ยังไม่ได้เชื่อมต่อกับห้อง (เน็ตหลุด?)');
+  }, [rawSend]);
+
   return {
-    messages, pending, conn, connError, hasMore, loadingOlder, reads,
+    messages, pending, conn, connError, hasMore, loadingOlder, reads, typing,
     send, sendFile, sendForm, sendSticker, retry, discard, markRead, loadOlder, react, loadUntil,
+    sendTyping, sendPoll, vote, closePoll,
   };
 }

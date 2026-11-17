@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0009_delete_chat.sql
+-- ล่าสุดถึง: 0010_chat_more.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -48,7 +48,7 @@ CREATE TABLE rooms (
   last_sender_name      TEXT,
   visibility            TEXT CHECK (visibility IN ('public', 'private')),  -- 0003: ชาเนลสาธารณะ/ส่วนตัว (ห้องอื่น NULL)
   description           TEXT,                                              -- 0003: คำอธิบายชาเนล
-  pinned_seq            INTEGER,  -- 0006: ข้อความที่ปักหมุด (ลำดับในห้อง)
+  pinned_seq            INTEGER,  -- 0006: ข้อความที่ปักหมุด (ลำดับในห้อง) — เลิกใช้ตั้งแต่ 0010 (ย้ายไป room_pins)
   pinned_text           TEXT,     -- 0006: ข้อความย่อของโพสต์ที่ปักหมุด
   pinned_sender         TEXT,     -- 0006
   pinned_by             TEXT,     -- 0006: ใครปักหมุด (users.id)
@@ -71,13 +71,13 @@ CREATE TABLE room_members (
 );
 CREATE INDEX idx_room_members_user ON room_members(user_id);
 
--- ---------- ไฟล์ในห้อง (0002) — ตัวไฟล์อยู่ใน R2 · status: uploaded / attached / expired ----------
+-- ---------- ไฟล์ในห้อง (0002 · 0010 เพิ่มชนิด video) — ตัวไฟล์อยู่ใน R2 · status: uploaded / attached / expired ----------
 CREATE TABLE files (
   id           TEXT PRIMARY KEY,
   room_id      TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
   uploader_id  TEXT NOT NULL REFERENCES users(id),
   r2_key       TEXT NOT NULL UNIQUE,
-  kind         TEXT NOT NULL CHECK (kind IN ('image', 'file', 'voice')),
+  kind         TEXT NOT NULL CHECK (kind IN ('image', 'file', 'voice', 'video')),
   mime         TEXT NOT NULL,
   name         TEXT NOT NULL,
   size         INTEGER NOT NULL,
@@ -272,3 +272,28 @@ CREATE TABLE user_notes (
   updated_at  TEXT NOT NULL
 );
 CREATE INDEX idx_user_notes_user ON user_notes(user_id, updated_at);
+
+-- ---------- ปักหมุด/ประกาศ หลายข้อความต่อห้อง (0010 — สูงสุด 5 ตรวจในโค้ด) ----------
+CREATE TABLE room_pins (
+  room_id    TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  seq        INTEGER NOT NULL,
+  text       TEXT NOT NULL,
+  sender     TEXT,
+  pinned_by  TEXT REFERENCES users(id) ON DELETE SET NULL,
+  pinned_at  TEXT NOT NULL,
+  PRIMARY KEY (room_id, seq)
+);
+CREATE INDEX idx_room_pins_room ON room_pins(room_id, pinned_at);
+
+-- ---------- ตัวอย่างลิงก์ (0010) — เก็บ 7 วัน · รูปเปิดผ่านเซิร์ฟเวอร์เราเท่านั้น ----------
+CREATE TABLE link_previews (
+  url          TEXT PRIMARY KEY,
+  status       TEXT NOT NULL CHECK (status IN ('ok', 'failed')),
+  title        TEXT,
+  description  TEXT,
+  site_name    TEXT,
+  image_url    TEXT,
+  error        TEXT,
+  fetched_at   TEXT NOT NULL,
+  expires_at   TEXT NOT NULL
+);
