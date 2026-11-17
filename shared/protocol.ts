@@ -21,6 +21,14 @@ export const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'
 /** ชนิดเสียงที่รับ (ตัด ;codecs=... ออกก่อนเทียบ) */
 export const VOICE_MIMES = ['audio/mp4', 'audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/aac'];
 
+// ---------- รีแอคชัน (2026-11-17): 6 ตัวตายตัวแบบ LINE · คนละ 1 อัน ----------
+export const REACTIONS = ['❤️', '😂', '👍', '😮', '😢', '🙏'] as const;
+export interface ReactionGroup { emoji: string; users: { id: string; name: string }[] }
+
+/** อ่านแล้ว (2026-11-17): สมาชิกแต่ละคนอ่านถึงข้อความไหน · joinedAt ใช้ไม่นับคนที่เข้าห้องทีหลังข้อความ
+ *  ชาเนล: ส่งให้เฉพาะเจ้าของ/แอดมิน และไม่ส่งชื่อ (ผู้ใช้เลือก: เห็นแค่จำนวน) */
+export interface ReadState { userId: string; name?: string; seq: number; joinedAt: string }
+
 /** ข้อความที่ถูกตอบกลับ (ห้องเติมข้อมูลจริงให้เอง หน้าเว็บส่งมาแค่ seq) */
 export interface ReplyRef { seq: number; senderId?: string; senderName?: string; snippet?: string }
 
@@ -30,6 +38,7 @@ export interface MessageExtra {
   formId?: string; formTitle?: string; orderId?: number; silent?: boolean; replyTo?: ReplyRef;
   stickerId?: string;   // เฟส 5: ข้อความชนิด sticker
   noteId?: string;      // เฟส 5: ข้อความแจ้ง "โน้ตใหม่" ในห้อง (แตะเพื่อเปิดโน้ต)
+  forwardedFrom?: string; // ส่งต่อ: ชื่อผู้ส่งต้นฉบับ (worker ใส่ให้เท่านั้น — หน้าเว็บส่งมาเองไม่ได้)
 }
 
 /** สิ่งที่ส่งถึงแอปของผู้ใช้ (UserHub) เมื่อมีข้อความใหม่ในห้องที่ไม่ได้เปิดดูอยู่ */
@@ -66,6 +75,8 @@ export interface ChatMessage {
   createdAt: string;    // เวลาไทย ISO
   /** ลบแล้ว (ยกเลิกส่งโดยผู้ส่ง / ลบโดยแอดมินห้อง) — body/file/extra ถูกล้าง เหลือแค่ร่องรอย */
   deleted?: { at: string; by: 'sender' | 'admin' } | null;
+  /** รีแอคชัน (DO v6) — ว่าง = ยังไม่มีใครกด */
+  reactions?: ReactionGroup[];
 }
 
 // ---------- หน้าเว็บ → ห้อง ----------
@@ -75,6 +86,7 @@ export type ClientFrame =
   | { type: 'read'; seq: number }
   | { type: 'presence'; visible: boolean } // เฟส 3: หน้าจอห้องนี้เปิดอยู่ไหม (เปิดอยู่ = ไม่ส่งแจ้งเตือน)
   | { type: 'presence-app'; visible: boolean }  // UserHub: แอปเปิดอยู่บนจอไหม (ใช้แทนแจ้งเตือนมือถือ)
+  | { type: 'react'; seq: number; emoji: string | null }  // null = เอารีแอคชันของตัวเองออก
   | { type: 'ping' };
 
 // ---------- ห้อง → หน้าเว็บ ----------
@@ -86,4 +98,7 @@ export type ServerFrame =
   | { type: 'warning'; code: string; message: string }
   | { type: 'pong' }
   | { type: 'room_update' }   // ข้อมูลห้องเปลี่ยน (เช่น ปักหมุด) → หน้าเว็บโหลดข้อมูลห้องใหม่
+  | { type: 'reads'; reads: ReadState[] }          // อ่านแล้ว: ทั้งห้อง (ส่งหลัง sync)
+  | { type: 'read'; userId: string; seq: number }  // อ่านแล้ว: มีคนอ่านเพิ่ม
+  | { type: 'reactions'; seq: number; reactions: ReactionGroup[] }
   | ActivityFrame;

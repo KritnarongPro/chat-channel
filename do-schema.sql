@@ -3,7 +3,7 @@
 -- ตารางพวกนี้ไม่ได้อยู่ใน D1 จึงใช้ migrations/ ของ D1 ไม่ได้
 -- ตัวที่ใช้จริงอยู่ใน worker/room.ts (DO_MIGRATIONS) — ห้องจะอัปเดตตัวเองตอนถูกเปิดครั้งถัดไป
 -- แก้โครง → เพิ่มเวอร์ชันใหม่ใน DO_MIGRATIONS + เลข DO_SCHEMA_VERSION + อัปเดตไฟล์นี้ (check:rules ตรวจเลขให้ตรงกัน)
--- DO_SCHEMA_VERSION: 5
+-- DO_SCHEMA_VERSION: 6
 -- =====================================================================
 
 -- ---------- v1 ----------
@@ -33,4 +33,15 @@ CREATE TABLE messages (
   extra            TEXT,  -- v3: JSON เช่น { formId, formTitle } / { orderId } · v4: { stickerId } / { noteId }
   deleted_at       TEXT,  -- v5: ยกเลิกส่ง/แอดมินลบ (เวลาไทย) — เนื้อหา/ไฟล์ถูกล้างแล้ว
   deleted_by       TEXT   -- v5: 'sender' | 'admin'
+);
+
+-- ---------- v6 (2026-11-17): รีแอคชัน — คนละ 1 อันต่อข้อความ (6 แบบใน shared/protocol.ts → REACTIONS) ----------
+-- ลบข้อความ → ลบรีแอคชันของข้อความนั้นด้วย
+CREATE TABLE reactions (
+  seq        INTEGER NOT NULL,   -- messages.seq
+  user_id    TEXT NOT NULL,
+  user_name  TEXT NOT NULL,      -- ชื่อตอนกด (แสดงในรายชื่อคนกด)
+  emoji      TEXT NOT NULL,
+  created_at TEXT NOT NULL,      -- เวลาไทย ISO
+  PRIMARY KEY (seq, user_id)
 );

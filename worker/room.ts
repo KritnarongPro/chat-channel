@@ -7,6 +7,7 @@
 //   2. WebSocket: รับข้อความ / sync / read / ping
 //   3. งานเขียนลง D1 (ข้อความล่าสุดของห้อง, อ่านถึงไหน) — ล้มเหลว → แจ้งผู้ส่งเสมอ
 //   4. แจ้งเตือนบนมือถือ (เฟส 3): หาผู้รับ → ใส่งานใน Queue chat-push (ไม่ส่งให้คนที่เปิดห้องนี้อยู่)
+//   6. ฟีเจอร์แชท (2026-11-17): อ่านแล้ว · รีแอคชัน · ค้นหาในห้อง (ส่งต่อ = worker เรียก /post พร้อม forwardedFrom)
 //
 // worker ตรวจล็อกอิน + สิทธิ์สมาชิกห้องก่อนส่งต่อมาที่นี่ แล้วแนบหัว X-User-Id / X-User-Name / X-Room-Id
 // =====================================================================
@@ -14,8 +15,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import { nowThai } from '../shared/time';
 import {
-  ChatMessage, ClientFrame, MessageExtra, ServerFrame,
-  HISTORY_LIMIT, MAX_MESSAGE_CHARS, SYNC_LIMIT,
+  ChatMessage, ClientFrame, MessageExtra, ReactionGroup, ReadState, ServerFrame,
+  HISTORY_LIMIT, MAX_MESSAGE_CHARS, REACTIONS, SYNC_LIMIT,
 } from '../shared/protocol';
 import { DM_ALLOWED_SQL, type Env } from './lib';
 import type { PushJob } from './push';
@@ -23,7 +24,7 @@ import type { PushJob } from './push';
 // =====================================================================
 // 0. โครงตารางในห้อง — ต้องตรงกับ do-schema.sql (check:rules ตรวจเลขเวอร์ชัน)
 // =====================================================================
-export const DO_SCHEMA_VERSION = 5;
+export const DO_SCHEMA_VERSION = 6;
 
 const DO_MIGRATIONS: Record<number, string[]> = {
   1: [
@@ -121,6 +122,17 @@ const DO_MIGRATIONS: Record<number, string[]> = {
     `ALTER TABLE messages ADD COLUMN deleted_at TEXT`,
     `ALTER TABLE messages ADD COLUMN deleted_by TEXT`,
   ],
+  // v6 (2026-11-17): รีแอคชัน — คนละ 1 อันต่อข้อความ (กดอันใหม่ = แทนอันเดิม)
+  6: [
+    `CREATE TABLE IF NOT EXISTS reactions (
+       seq        INTEGER NOT NULL,
+       user_id    TEXT NOT NULL,
+       user_name  TEXT NOT NULL,
+       emoji      TEXT NOT NULL,
+       created_at TEXT NOT NULL,
+       PRIMARY KEY (seq, user_id)
+     )`,
+  ],
 };
 
 /** ยกเลิกส่งข้อความของตัวเองได้ภายในเวลานี้ (ผู้ใช้เลือก 24 ชม. แบบ LINE) · แอดมินห้องลบได้ทุกเวลา */
@@ -183,7 +195,13 @@ type FileRow = {
 type Reply = (frame: ServerFrame) => void;
 
 // clearedSeq (ลบแชท): คนนี้ล้างแชทฝั่งตัวเองถึงลำดับนี้ → ไม่ส่งข้อความ seq <= clearedSeq ให้
-interface SocketInfo { userId: string; userName: string; visible: boolean; clearedSeq?: number }
+// role/roomType (อ่านแล้ว): ชาเนลส่งสถานะอ่านให้เฉพาะเจ้าของ/แอดมิน — worker แนบมาตอนเปิดห้อง
+interface SocketInfo { userId: string; userName: string; visible: boolean; clearedSeq?: number; role?: string; roomType?: string }
+
+/** ใครเห็น "อ่านแล้ว" ได้บ้าง: แชท 1:1 / กลุ่ม ทุกคน · ชาเนล เฉพาะเจ้าของ/แอดมินชาเนล */
+const canSeeReads = (i: SocketInfo) => i.roomType !== 'channel' || i.role === 'owner' || i.role === 'admin';
+
+const SEARCH_LIMIT = 50;
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -246,7 +264,10 @@ export class ChatRoom extends DurableObject<Env> {
       const [client, server] = [pair[0], pair[1]];
       this.ctx.acceptWebSocket(server);
       const clearedSeq = Math.max(0, Number(req.headers.get('X-Cleared-Seq') || 0) || 0);
-      server.serializeAttachment({ userId, userName: decodeURIComponent(userName), visible: true, clearedSeq } satisfies SocketInfo);
+      server.serializeAttachment({
+        userId, userName: decodeURIComponent(userName), visible: true, clearedSeq,
+        role: req.headers.get('X-Room-Role') ?? 'member', roomType: req.headers.get('X-Room-Type') ?? 'group',
+      } satisfies SocketInfo);
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -262,7 +283,7 @@ export class ChatRoom extends DurableObject<Env> {
         `SELECT * FROM messages WHERE seq < ? AND seq > ? ORDER BY seq DESC LIMIT ?`, before, after, limit + 1,
       ).toArray();
       const hasMore = rows.length > limit;
-      const messages = rows.slice(0, limit).reverse().map(msgOut);
+      const messages = this.withReactions(rows.slice(0, limit).reverse().map(msgOut));
       return json({ ok: true, data: { messages, hasMore } });
     }
 
@@ -273,6 +294,24 @@ export class ChatRoom extends DurableObject<Env> {
       if (!row) return json({ ok: false, error: { code: 'MESSAGE_NOT_FOUND', message: 'ไม่พบข้อความนี้ในห้อง' } }, 404);
       const m = msgOut(row);
       return json({ ok: true, data: { message: m, preview: previewOf(m) } });
+    }
+
+    // ---------- ค้นหาในห้อง (ผู้ใช้เลือก: เฉพาะห้องที่เปิดอยู่) — ค้นคำบางส่วน เพราะภาษาไทยไม่เว้นวรรค ตัดคำแบบ FTS ไม่ได้ ----------
+    // ใช้ instr() ไม่ใช้ LIKE: SQLite ของ Cloudflare จำกัดรูปแบบ LIKE 50 ไบต์ (ไทย 1 ตัว = 3 ไบต์ → ค้นได้แค่ ~16 ตัว) — CORE-07
+    // after = จุดที่คนนี้ลบแชทฝั่งตัวเอง (ไม่ค้นข้อความก่อนนั้น) · ไม่ค้นข้อความที่ถูกลบ
+    if (url.pathname === '/search') {
+      const q = (url.searchParams.get('q') ?? '').trim();
+      const after = Math.max(0, Number(url.searchParams.get('after') || 0) || 0);
+      if (q.length < 1 || q.length > 100) {
+        return json({ ok: false, error: { code: 'BAD_QUERY', message: 'คำค้นต้องยาว 1–100 ตัวอักษร' } }, 400);
+      }
+      const needle = q.toLowerCase();  // lower() ของ SQLite แปลงแค่ A–Z (ภาษาไทยไม่มีตัวพิมพ์ใหญ่เล็กอยู่แล้ว)
+      const rows = this.sql.exec<MsgRow>(
+        `SELECT * FROM messages
+         WHERE deleted_at IS NULL AND seq > ? AND (instr(lower(body), ?) > 0 OR instr(lower(COALESCE(file_name, '')), ?) > 0)
+         ORDER BY seq DESC LIMIT ?`, after, needle, needle, SEARCH_LIMIT + 1,
+      ).toArray();
+      return json({ ok: true, data: { messages: rows.slice(0, SEARCH_LIMIT).map(msgOut), more: rows.length > SEARCH_LIMIT } });
     }
 
     // ---------- ยกเลิกส่ง / แอดมินลบข้อความ (worker ตรวจสมาชิก + บอกว่าเป็นแอดมินห้องไหม) ----------
@@ -304,6 +343,7 @@ export class ChatRoom extends DurableObject<Env> {
       }
       const at = nowThai();
       try {
+        this.sql.exec(`DELETE FROM reactions WHERE seq = ?`, seq);
         this.sql.exec(
           `UPDATE messages SET deleted_at = ?, deleted_by = ?, body = '', extra = NULL,
                   file_id = NULL, file_name = NULL, file_mime = NULL, file_size = NULL, file_width = NULL,
@@ -329,7 +369,10 @@ export class ChatRoom extends DurableObject<Env> {
     // ---------- ส่งข้อความจาก worker (บอทผ่าน Bot API / ระบบแจ้งสถานะออเดอร์) ----------
     // ตรวจสิทธิ์ซ้ำในห้องเหมือนคนส่งผ่าน WebSocket (checkPoster) — ผิดเงื่อนไขตอบ error พร้อมเหตุผล
     if (url.pathname === '/post' && req.method === 'POST') {
-      let p: { senderId?: string; senderName?: string; clientId?: string; kind?: string; body?: string; fileId?: string; extra?: unknown };
+      let p: {
+        senderId?: string; senderName?: string; clientId?: string; kind?: string; body?: string; fileId?: string; extra?: unknown;
+        forwardedFrom?: unknown;  // ส่งต่อ: มาจาก worker เท่านั้น (WebSocket ส่งค่านี้ไม่ได้)
+      };
       try {
         p = await req.json();
       } catch {
@@ -340,6 +383,7 @@ export class ChatRoom extends DurableObject<Env> {
       const message = await this.handleSend(
         (f) => frames.push(f), { userId: p.senderId, userName: p.senderName, visible: false },
         p.clientId ?? crypto.randomUUID().replace(/-/g, ''), p.body ?? '', p.kind ?? 'text', p.fileId, p.extra,
+        typeof p.forwardedFrom === 'string' ? p.forwardedFrom.slice(0, 80) : undefined,
       );
       const err = frames.find((f) => f.type === 'error');
       const warnings = frames.filter((f) => f.type === 'warning').map((f) => (f as { message: string }).message);
@@ -395,6 +439,10 @@ export class ChatRoom extends DurableObject<Env> {
         return;
       case 'sync':
         this.handleSync(ws, frame.afterSeq, info.clearedSeq ?? 0);
+        if (canSeeReads(info)) await this.sendReads(ws, info);
+        return;
+      case 'react':
+        await this.handleReact(ws, info, frame.seq, frame.emoji);
         return;
       case 'read':
         await this.handleRead(ws, info, frame.seq);
@@ -434,17 +482,18 @@ export class ChatRoom extends DurableObject<Env> {
         `SELECT * FROM messages WHERE seq > ? ORDER BY seq DESC LIMIT ?`, clearedSeq, HISTORY_LIMIT,
       ).toArray().reverse();
       const total = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE seq > ?`, clearedSeq).one().n;
-      this.send(ws, { type: 'sync', messages: rows.map(msgOut), hasMore: total > rows.length });
+      this.send(ws, { type: 'sync', messages: this.withReactions(rows.map(msgOut)), hasMore: total > rows.length });
       return;
     }
     rows = this.sql.exec<MsgRow>(
       `SELECT * FROM messages WHERE seq > ? ORDER BY seq ASC LIMIT ?`, Math.max(afterSeq, clearedSeq), SYNC_LIMIT + 1,
     ).toArray();
-    this.send(ws, { type: 'sync', messages: rows.slice(0, SYNC_LIMIT).map(msgOut), hasMore: rows.length > SYNC_LIMIT });
+    this.send(ws, { type: 'sync', messages: this.withReactions(rows.slice(0, SYNC_LIMIT).map(msgOut)), hasMore: rows.length > SYNC_LIMIT });
   }
 
   private async handleSend(
     out: Reply, info: SocketInfo, clientId: unknown, body: unknown, kind: unknown, fileId: unknown, extra?: unknown,
+    forwardedFrom?: string,
   ): Promise<ChatMessage | null> {
     // ---------- ตรวจข้อมูล ----------
     if (typeof clientId !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(clientId)) {
@@ -539,6 +588,9 @@ export class ChatRoom extends DurableObject<Env> {
       extraOut = { orderId: (extra as MessageExtra).orderId }; // ข้อความแจ้งสถานะออเดอร์ (ระบบใส่ให้)
     }
 
+    // ---------- ส่งต่อ: ป้าย "ส่งต่อจาก ชื่อ" (ผู้ใช้เลือก) — รับเฉพาะจาก worker ผ่าน /post ----------
+    if (forwardedFrom) extraOut = { ...(extraOut ?? {}), forwardedFrom };
+
     // ---------- แจ้งเตือน: ส่งแบบเงียบ + ตอบกลับ (ห้องเติมข้อมูลข้อความที่ถูกตอบเองจากของจริง ไม่เชื่อหน้าเว็บ) ----------
     const ex = (extra && typeof extra === 'object' ? extra : {}) as MessageExtra;
     if (ex.silent === true) extraOut = { ...(extraOut ?? {}), silent: true };
@@ -590,7 +642,7 @@ export class ChatRoom extends DurableObject<Env> {
   }
 
   /** อ่านชนิดห้อง + ตำแหน่งผู้ส่งจาก D1 ทุกครั้งที่ส่ง (คนที่ถูกเอาออก/ถูกถอดแอดมินระหว่างเปิดห้องค้างไว้จะส่งไม่ได้) */
-  private async checkPoster(out: Reply, clientId: string, info: SocketInfo): Promise<RoomInfo | null> {
+  private async checkPoster(out: Reply, clientId: string, info: SocketInfo, mode: 'post' | 'react' = 'post'): Promise<RoomInfo | null> {
     const roomId = this.roomId;
     let r: {
       type: RoomInfo['type']; title: string | null; role: string | null; is_bot: number | null; sys_role: string | null;
@@ -620,7 +672,8 @@ export class ChatRoom extends DurableObject<Env> {
       out({ type: 'error', clientId, code: 'NOT_MEMBER', message: 'คุณไม่ได้เป็นสมาชิกห้องนี้แล้ว' });
       return null;
     }
-    if (r.type === 'channel' && r.role !== 'owner' && r.role !== 'admin') {
+    // รีแอคชัน: ผู้ติดตามชาเนลกดได้ (ผู้ใช้เลือก: ทุกห้อง) · โพสต์: เฉพาะเจ้าของ/แอดมินชาเนล
+    if (mode === 'post' && r.type === 'channel' && r.role !== 'owner' && r.role !== 'admin') {
       out({ type: 'error', clientId, code: 'NOT_CHANNEL_ADMIN', message: 'ชาเนลนี้โพสต์ได้เฉพาะเจ้าของและแอดมินชาเนล' });
       return null;
     }
@@ -696,6 +749,7 @@ export class ChatRoom extends DurableObject<Env> {
           `UPDATE room_members SET last_read_seq = MAX(last_read_seq, ?) WHERE room_id = ? AND user_id = ?`,
         ).bind(m.seq, roomId, m.senderId),
       ]);
+      this.broadcastRead(m.senderId, m.seq);
     } catch (err) {
       console.error('อัปเดต rooms ใน D1 ไม่สำเร็จ', err);
       out({
@@ -712,9 +766,11 @@ export class ChatRoom extends DurableObject<Env> {
       return;
     }
     try {
-      await this.env.DB.prepare(
-        `UPDATE room_members SET last_read_seq = MAX(last_read_seq, ?) WHERE room_id = ? AND user_id = ?`,
-      ).bind(seq, roomId, info.userId).run();
+      // อัปเดตเฉพาะเมื่ออ่านเพิ่มจริง → แล้วค่อยบอกคนอื่นในห้อง (อ่านแล้ว)
+      const r = await this.env.DB.prepare(
+        `UPDATE room_members SET last_read_seq = ? WHERE room_id = ? AND user_id = ? AND last_read_seq < ?`,
+      ).bind(seq, roomId, info.userId, seq).run();
+      if (r.meta.changes === 1) this.broadcastRead(info.userId, seq);
     } catch (err) {
       console.error('บันทึกสถานะอ่านแล้วไม่สำเร็จ', err);
       this.send(ws, { type: 'warning', code: 'READ_FAILED', message: 'บันทึกสถานะ "อ่านแล้ว" ไม่สำเร็จ ตัวเลขยังไม่อ่านอาจไม่ตรง' });
@@ -812,4 +868,96 @@ export class ChatRoom extends DurableObject<Env> {
       out({ type: 'warning', code: 'BOT_FAILED', message: 'ส่งข้อความแล้ว แต่ส่งต่อให้บอทไม่สำเร็จ (Queue ขัดข้อง)' });
     }
   }
+
+  // =====================================================================
+  // 6. ฟีเจอร์แชท (2026-11-17): อ่านแล้ว · รีแอคชัน
+  // =====================================================================
+  /** อ่านแล้ว: ส่งสถานะทุกคน (ไม่รวมบอท) ให้ socket นี้ — ชาเนลไม่ส่งชื่อ (ผู้ใช้เลือก: เห็นแค่จำนวน) */
+  private async sendReads(ws: WebSocket, info: SocketInfo) {
+    const roomId = this.roomId;
+    if (!roomId) return;
+    try {
+      const rows = await this.env.DB.prepare(
+        `SELECT m.user_id, u.display_name, m.last_read_seq, m.joined_at FROM room_members m JOIN users u ON u.id = m.user_id
+         WHERE m.room_id = ? AND u.is_bot = 0`,
+      ).bind(roomId).all<{ user_id: string; display_name: string; last_read_seq: number; joined_at: string }>();
+      const showName = info.roomType !== 'channel';
+      const reads: ReadState[] = rows.results.map((r) => ({
+        userId: r.user_id, seq: r.last_read_seq, joinedAt: r.joined_at, ...(showName ? { name: r.display_name } : {}),
+      }));
+      this.send(ws, { type: 'reads', reads });
+    } catch (err) {
+      console.error('อ่านสถานะ "อ่านแล้ว" ไม่สำเร็จ', err);
+      this.send(ws, { type: 'warning', code: 'READS_FAILED', message: 'โหลดสถานะ "อ่านแล้ว" ไม่สำเร็จ (ฐานข้อมูลขัดข้อง) — เปิดห้องใหม่เพื่อลองอีกครั้ง' });
+    }
+  }
+
+  /** มีคนอ่านเพิ่ม → บอกเฉพาะ socket ที่มีสิทธิ์เห็น (ชาเนล: เจ้าของ/แอดมิน) */
+  private broadcastRead(userId: string, seq: number) {
+    for (const ws of this.ctx.getWebSockets()) {
+      const i = ws.deserializeAttachment() as SocketInfo | null;
+      if (i && canSeeReads(i)) this.send(ws, { type: 'read', userId, seq });
+    }
+  }
+
+  /** รีแอคชันของข้อความชุดหนึ่ง (อ่านครั้งเดียวตามช่วง seq) */
+  private withReactions(msgs: ChatMessage[]): ChatMessage[] {
+    if (msgs.length === 0) return msgs;
+    const seqs = msgs.map((m) => m.seq);
+    const rows = this.sql.exec<{ seq: number; user_id: string; user_name: string; emoji: string }>(
+      `SELECT seq, user_id, user_name, emoji FROM reactions WHERE seq BETWEEN ? AND ? ORDER BY created_at`,
+      Math.min(...seqs), Math.max(...seqs),
+    ).toArray();
+    if (rows.length === 0) return msgs;
+    const bySeq = new Map<number, typeof rows>();
+    for (const r of rows) bySeq.set(r.seq, [...(bySeq.get(r.seq) ?? []), r]);
+    return msgs.map((m) => (bySeq.has(m.seq) ? { ...m, reactions: groupReactions(bySeq.get(m.seq)!) } : m));
+  }
+
+  /** กด/เปลี่ยน/เอาออก รีแอคชัน — ตรวจสิทธิ์จาก D1 เหมือนการส่ง (ผู้ติดตามชาเนลกดได้) */
+  private async handleReact(ws: WebSocket, info: SocketInfo, seq: unknown, emoji: unknown) {
+    const err = (code: string, message: string) => this.send(ws, { type: 'error', code, message });
+    if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 1) return err('BAD_SEQ', 'ระบุข้อความที่จะกดรีแอคชันไม่ถูกต้อง');
+    if (emoji !== null && !(REACTIONS as readonly unknown[]).includes(emoji)) {
+      return err('BAD_EMOJI', 'อีโมจินี้ใช้กดรีแอคชันไม่ได้ (เลือกได้ 6 แบบ)');
+    }
+    const row = this.sql.exec<{ deleted_at: string | null }>(`SELECT deleted_at FROM messages WHERE seq = ?`, seq).toArray()[0];
+    if (!row || seq <= (info.clearedSeq ?? 0)) return err('MESSAGE_NOT_FOUND', 'ไม่พบข้อความนี้ในห้อง');
+    if (row.deleted_at) return err('MESSAGE_DELETED', 'ข้อความนี้ถูกลบแล้ว กดรีแอคชันไม่ได้');
+    const frames: ServerFrame[] = [];
+    const room = await this.checkPoster((f) => frames.push(f), 'react', info, 'react');
+    if (!room) {
+      const e = frames.find((f) => f.type === 'error') as { code: string; message: string } | undefined;
+      return err(e?.code ?? 'REACT_FAILED', `กดรีแอคชันไม่ได้: ${e?.message ?? 'ตรวจสิทธิ์ไม่ผ่าน'}`);
+    }
+    try {
+      if (emoji === null) {
+        this.sql.exec(`DELETE FROM reactions WHERE seq = ? AND user_id = ?`, seq, info.userId);
+      } else {
+        this.sql.exec(
+          `INSERT INTO reactions (seq, user_id, user_name, emoji, created_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(seq, user_id) DO UPDATE SET emoji = excluded.emoji, user_name = excluded.user_name, created_at = excluded.created_at`,
+          seq, info.userId, info.userName, emoji, nowThai(),
+        );
+      }
+    } catch (e) {
+      console.error('บันทึกรีแอคชันไม่สำเร็จ', e);
+      return err('REACT_FAILED', 'บันทึกรีแอคชันไม่สำเร็จ (ที่เก็บข้อความขัดข้อง) กรุณาลองใหม่');
+    }
+    const rows = this.sql.exec<{ seq: number; user_id: string; user_name: string; emoji: string }>(
+      `SELECT seq, user_id, user_name, emoji FROM reactions WHERE seq = ? ORDER BY created_at`, seq,
+    ).toArray();
+    this.broadcast({ type: 'reactions', seq, reactions: groupReactions(rows) });
+  }
+}
+
+/** รวมรีแอคชันเป็นกลุ่มตามอีโมจิ เรียงตามลำดับใน REACTIONS */
+function groupReactions(rows: { user_id: string; user_name: string; emoji: string }[]): ReactionGroup[] {
+  const map = new Map<string, ReactionGroup>();
+  for (const r of rows) {
+    const g = map.get(r.emoji) ?? { emoji: r.emoji, users: [] };
+    g.users.push({ id: r.user_id, name: r.user_name });
+    map.set(r.emoji, g);
+  }
+  return [...map.values()].sort((a, b) => REACTIONS.indexOf(a.emoji as never) - REACTIONS.indexOf(b.emoji as never));
 }

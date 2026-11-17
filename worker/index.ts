@@ -9,6 +9,7 @@
 //                invites (ลิงก์เชิญเข้าชาเนล/กลุ่ม)
 //                notify (ระบบแจ้งเตือนแบบ Telegram: ปิดเสียงมีเวลา, ตั้งค่ารวม, ปักหมุด, แอปเปิดอยู่, บอทแจ้งเตือน)
 //                เฟส 5: prefs (ธีม/ตัวอักษร) / friends (เพื่อน) / stickers / notes (โน้ตในห้อง + ส่วนตัว)
+//                ฟีเจอร์แชท (2026-11-17): ค้นหาในห้อง / ส่งต่อข้อความ (อ่านแล้ว + รีแอคชัน อยู่ในห้องแชท room.ts)
 //   3. ตัวช่วยเรื่องห้อง (ตรวจสมาชิก, สิทธิ์โพสต์)
 //   4. Entry point (fetch + scheduled: ลบไฟล์ครบ 180 วัน + queue: ส่งแจ้งเตือน)
 //
@@ -101,6 +102,9 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/rooms/:id/messages/:seq/delete', need: 'active', handler: deleteMessage },
   { method: 'POST', pattern: '/api/rooms/:id/clear',          need: 'active', handler: clearChat },
   { method: 'GET',  pattern: '/api/rooms/:id/ws',             need: 'active', handler: openSocket },
+  // ---------- ฟีเจอร์แชท (2026-11-17): ค้นหาในห้องที่เปิดอยู่ · ส่งต่อ (ขึ้น "ส่งต่อจาก ชื่อ") ----------
+  { method: 'GET',  pattern: '/api/rooms/:id/search',         need: 'active', handler: searchMessages },
+  { method: 'POST', pattern: '/api/rooms/:id/messages/:seq/forward', need: 'active', handler: forwardMessage },
 
   // ---------- files (รูป / ไฟล์ / เสียง — ตัวไฟล์อยู่ใน R2 เปิดได้เฉพาะสมาชิกห้อง) ----------
   { method: 'POST', pattern: '/api/rooms/:id/files',          need: 'active', handler: uploadFile },
@@ -922,8 +926,127 @@ async function openSocket(c: Ctx) {
       'X-User-Id': c.user!.id,
       'X-Cleared-Seq': String(room.cleared_seq ?? 0),
       'X-User-Name': encodeURIComponent(c.user!.displayName),
+      // อ่านแล้ว: ชาเนลส่งสถานะอ่านให้เฉพาะเจ้าของ/แอดมิน
+      'X-Room-Role': room.my_role,
+      'X-Room-Type': room.type,
     },
   }));
+}
+
+// ---------- ฟีเจอร์แชท (2026-11-17): ค้นหา / ส่งต่อ ----------
+/** ค้นหาในห้อง — ไม่ค้นข้อความก่อนจุดที่ลบแชทฝั่งฉัน (after) และข้อความที่ถูกลบ */
+async function searchMessages(c: Ctx) {
+  const { room } = await requireMember(c.env, c.params.id, c.user!.id);
+  const q = (c.url.searchParams.get('q') ?? '').trim();
+  if (q.length < 1 || q.length > 100) throw new ApiError(400, 'BAD_QUERY', 'คำค้นต้องยาว 1–100 ตัวอักษร');
+  const after = room.cleared_seq ?? 0;
+  return roomStub(c.env, c.params.id).fetch(new Request(`https://room/search?q=${encodeURIComponent(q)}&after=${after}`, {
+    headers: { 'X-Room-Id': c.params.id },
+  }));
+}
+
+const FORWARD_MAX_TARGETS = 10;
+type SrcMessage = {
+  seq: number; senderName: string; kind: string; body: string; deleted?: unknown;
+  file: { id: string; expiresAt: string } | null; extra: { stickerId?: string; formId?: string; forwardedFrom?: string } | null;
+};
+
+/**
+ * ส่งต่อข้อความไปได้หลายห้อง (สูงสุด 10) — ตรวจสิทธิ์ห้องปลายทางเหมือนส่งปกติ (สมาชิก / ชาเนลโพสต์ได้ / เพื่อน)
+ * รูป/ไฟล์/เสียง: คัดลอกเป็นไฟล์ใหม่ของห้องปลายทาง (สิทธิ์เปิดไฟล์แยกตามห้องเหมือนเดิม)
+ * ผลรายห้อง: ห้องที่ส่งไม่ได้ตอบเหตุผลกลับไป (ไม่ข้ามเงียบ)
+ */
+async function forwardMessage(c: Ctx) {
+  const { room } = await requireMember(c.env, c.params.id, c.user!.id);
+  const seq = Number(c.params.seq);
+  if (!Number.isInteger(seq) || seq < 1) throw new ApiError(400, 'BAD_SEQ', 'ระบุข้อความที่จะส่งต่อไม่ถูกต้อง');
+  if (seq <= (room.cleared_seq ?? 0)) throw new ApiError(404, 'MESSAGE_NOT_FOUND', 'ไม่พบข้อความนี้ในห้อง');
+  const body = await readJson<{ targets?: unknown }>(c.req);
+  const targets = Array.isArray(body.targets) ? [...new Set(body.targets.filter((t): t is string => typeof t === 'string' && t.length > 0))] : [];
+  if (targets.length === 0) throw new ApiError(400, 'NO_TARGETS', 'เลือกห้องที่จะส่งต่ออย่างน้อย 1 ห้อง');
+  if (targets.length > FORWARD_MAX_TARGETS) throw new ApiError(400, 'TOO_MANY_TARGETS', `ส่งต่อได้ครั้งละไม่เกิน ${FORWARD_MAX_TARGETS} ห้อง`);
+
+  const res = await roomStub(c.env, c.params.id).fetch(new Request(`https://room/message?seq=${seq}`, { headers: { 'X-Room-Id': c.params.id } }));
+  const j = (await res.json()) as { ok: boolean; data?: { message: SrcMessage }; error?: { code: string; message: string } };
+  if (!j.ok || !j.data) throw new ApiError(404, j.error?.code ?? 'MESSAGE_NOT_FOUND', j.error?.message ?? 'ไม่พบข้อความนี้');
+  const src = j.data.message;
+  if (src.deleted) throw new ApiError(400, 'MESSAGE_DELETED', 'ข้อความนี้ถูกลบแล้ว ส่งต่อไม่ได้');
+  if (src.file && src.file.expiresAt <= nowThai()) throw new ApiError(410, 'FILE_EXPIRED', 'ไฟล์ของข้อความนี้หมดอายุแล้ว (เก็บ 180 วัน) ส่งต่อไม่ได้');
+
+  const results: { roomId: string; ok: boolean; title?: string; error?: { code: string; message: string } }[] = [];
+  for (const roomId of targets) {
+    try {
+      const title = await forwardOne(c, src, roomId);
+      results.push({ roomId, ok: true, title });
+    } catch (err) {
+      const e = err instanceof ApiError ? { code: err.code, message: err.message } : { code: 'FORWARD_FAILED', message: 'ส่งต่อไม่สำเร็จ (ระบบขัดข้อง)' };
+      if (!(err instanceof ApiError)) console.error('ส่งต่อข้อความไม่สำเร็จ', roomId, err);
+      results.push({ roomId, ok: false, error: e });
+    }
+  }
+  return ok({ results, sent: results.filter((r) => r.ok).length });
+}
+
+async function forwardOne(c: Ctx, src: SrcMessage, roomId: string): Promise<string> {
+  const { room: t, role } = await requireMember(c.env, roomId, c.user!.id);
+  requirePoster(t.type, role);
+  const fileId = src.file ? await copyFileTo(c, src.file.id, roomId) : undefined;
+  const extra = src.kind === 'sticker' ? { stickerId: src.extra?.stickerId } : src.kind === 'form' ? { formId: src.extra?.formId } : undefined;
+  try {
+    await postToRoom(c.env, roomId, c.user!, {
+      kind: src.kind, body: src.body, extra, fileId,
+      forwardedFrom: src.extra?.forwardedFrom ?? src.senderName,  // ส่งต่อซ้ำ → ยังขึ้นชื่อคนเขียนคนแรก
+    });
+  } catch (err) {
+    if (fileId) await dropCopiedFile(c.env, fileId);
+    throw err;
+  }
+  return roomOut(t).title;
+}
+
+/** คัดลอกไฟล์ใน R2 เป็นไฟล์ใหม่ของห้องปลายทาง (สถานะ uploaded → ห้องจองเองตอนส่ง) */
+async function copyFileTo(c: Ctx, srcFileId: string, roomId: string): Promise<string> {
+  const f = await db('อ่านไฟล์ต้นฉบับ', () =>
+    c.env.DB.prepare(`SELECT * FROM files WHERE id = ? AND room_id = ?`).bind(srcFileId, c.params.id)
+      .first<{ r2_key: string; kind: string; mime: string; name: string; size: number; width: number | null; height: number | null; duration_ms: number | null; status: string }>(),
+  );
+  if (!f || f.status === 'expired') throw new ApiError(410, 'FILE_EXPIRED', 'ไฟล์ต้นฉบับถูกลบหรือหมดอายุแล้ว ส่งต่อไม่ได้');
+  const obj = await c.env.FILES.get(f.r2_key);
+  if (!obj) throw new ApiError(410, 'FILE_EXPIRED', 'ไม่พบไฟล์ต้นฉบับในที่เก็บ (อาจถูกลบแล้ว) ส่งต่อไม่ได้');
+  const id = newId();
+  const key = `rooms/${roomId}/${id}`;
+  try {
+    // อ่านเป็นก้อน (≤ 25MB) — R2 put ต้องรู้ขนาดล่วงหน้า
+    await c.env.FILES.put(key, await obj.arrayBuffer(), { httpMetadata: { contentType: f.mime } });
+  } catch (err) {
+    console.error('คัดลอกไฟล์ใน R2 ไม่สำเร็จ', err);
+    throw new ApiError(502, 'R2_FAILED', 'คัดลอกไฟล์ไปห้องปลายทางไม่สำเร็จ (ที่เก็บไฟล์ขัดข้อง)');
+  }
+  try {
+    await c.env.DB.prepare(
+      `INSERT INTO files (id, room_id, uploader_id, r2_key, kind, mime, name, size, width, height, duration_ms,
+                          status, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploaded', ?, ?)`,
+    ).bind(id, roomId, c.user!.id, key, f.kind, f.mime, f.name, f.size, f.width, f.height, f.duration_ms,
+      nowThai(), thaiAfter(FILE_RETENTION_DAYS * 86400_000)).run();
+  } catch (err) {
+    console.error('บันทึกไฟล์ที่ส่งต่อลง D1 ไม่สำเร็จ', err);
+    try { await c.env.FILES.delete(key); } catch (delErr) { console.error('ลบไฟล์ที่ค้างใน R2 ไม่สำเร็จ', key, delErr); }
+    throw new ApiError(500, 'DB_FAILED', 'บันทึกข้อมูลไฟล์ที่ส่งต่อไม่สำเร็จ');
+  }
+  return id;
+}
+
+/** ส่งต่อไม่สำเร็จ → ลบไฟล์ที่คัดลอกไว้ (ยังไม่ได้ติดกับข้อความ) */
+async function dropCopiedFile(env: Env, fileId: string) {
+  try {
+    const f = await env.DB.prepare(`SELECT r2_key FROM files WHERE id = ? AND status = 'uploaded'`).bind(fileId).first<{ r2_key: string }>();
+    if (!f) return;
+    await env.FILES.delete(f.r2_key);
+    await env.DB.prepare(`DELETE FROM files WHERE id = ? AND status = 'uploaded'`).bind(fileId).run();
+  } catch (err) {
+    console.error('ลบไฟล์ที่คัดลอกไว้ (ส่งต่อไม่สำเร็จ) ไม่สำเร็จ — cron 180 วันจะลบเอง', fileId, err);
+  }
 }
 
 // ---------- files ----------
@@ -1261,7 +1384,7 @@ async function botRooms(c: Ctx) {
 }
 
 /** ส่งข้อความเข้าห้องในนามผู้ส่ง ผ่าน Durable Object (ตรวจสิทธิ์ซ้ำในห้อง) → คืนผลหรือ ApiError พร้อมเหตุผล */
-async function postToRoom(env: Env, roomId: string, sender: User, p: { kind: string; body: string; extra?: unknown }) {
+async function postToRoom(env: Env, roomId: string, sender: User, p: { kind: string; body: string; extra?: unknown; fileId?: string; forwardedFrom?: string }) {
   const res = await roomStub(env, roomId).fetch(new Request('https://room/post', {
     method: 'POST',
     headers: { 'X-Room-Id': roomId, 'content-type': 'application/json' },

@@ -6,15 +6,17 @@
 // แจ้งเตือน: ปิดเสียงตามเวลา · ปักหมุด · ตอบกลับ · @ชื่อ · ส่งแบบเงียบ
 // เฟส 5: สติกเกอร์ (แผงเลือกในช่องพิมพ์) · ปุ่ม 📝 โน้ตของห้อง
 // ลบแชท: ยกเลิกส่ง (24 ชม.) / แอดมินลบ ในเมนู ⋯ ของข้อความ · ปุ่ม ⋯ บนหัวห้อง: ลบแชทฝั่งฉัน / ออกจากกลุ่ม
+// ฟีเจอร์แชท (2026-11-17): อ่านแล้ว (แบบ LINE) · รีแอคชัน 6 แบบ · คัดลอก · ส่งต่อ (ขึ้นชื่อต้นฉบับ) · 🔍 ค้นหาในห้อง
+//   กดค้าง/คลิกขวาที่ข้อความ = เปิดเมนูข้อความ
 // =====================================================================
 
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
 import { thaiClock, thaiDate } from '../../shared/time';
-import { MAX_MESSAGE_CHARS } from '../../shared/protocol';
+import { MAX_MESSAGE_CHARS, REACTIONS } from '../../shared/protocol';
 import StickerPicker from '../StickerPicker';
 import { ChatMessage, FormInfo, Room, RoomMember, User, api, errMsg, stickerUrl } from '../api';
-import type { MessageExtra, ReplyRef } from '../../shared/protocol';
+import type { MessageExtra, ReactionGroup, ReadState, ReplyRef } from '../../shared/protocol';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
@@ -49,6 +51,12 @@ export default function ChatRoomPage() {
   const [showMute, setShowMute] = useState(false);
   const [showStickers, setShowStickers] = useState(false);
   const [showRoomMenu, setShowRoomMenu] = useState(false);
+  // ---------- ฟีเจอร์แชท ----------
+  const [showSearch, setShowSearch] = useState(false);
+  const [forwardFor, setForwardFor] = useState<ChatMessage | null>(null);
+  const [readersFor, setReadersFor] = useState<ReadState[] | null>(null);
+  const [reactionsFor, setReactionsFor] = useState<ChatMessage | null>(null);
+  const pressTimer = useRef<number | undefined>(undefined);
 
   const loadRoom = useCallback(async () => {
     try {
@@ -215,13 +223,38 @@ export default function ChatRoomPage() {
     }
   }
 
-  function jumpTo(seq: number) {
+  /** กระโดดไปที่ข้อความ — ยังไม่ได้โหลด → โหลดย้อนหลังจนเจอก่อน (ผลค้นหา / ข้อความที่ตอบกลับ / ปักหมุด) */
+  async function jumpTo(seq: number) {
+    stickBottom.current = false;
+    if (!document.getElementById(`msg-${seq}`)) {
+      const found = await s.loadUntil(seq);
+      if (!found) { notify('warning', 'ไม่พบข้อความนี้ในแชท (อาจถูกลบ หรืออยู่ก่อนที่คุณลบแชทฝั่งตัวเอง)'); return; }
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));  // รอให้ข้อความที่เพิ่งโหลดขึ้นจอ
+    }
     const el = document.getElementById(`msg-${seq}`);
-    if (!el) { notify('warning', 'ข้อความนี้อยู่ไกลเกินไป — เลื่อนขึ้นเพื่อโหลดข้อความเก่าก่อน'); return; }
+    if (!el) { notify('warning', 'ไม่พบข้อความนี้ในแชท (อาจถูกลบไปแล้ว)'); return; }
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     el.classList.add('flash');
     setTimeout(() => el.classList.remove('flash'), 1500);
   }
+
+  // ---------- อ่านแล้ว: นับคนที่อ่านถึงข้อความนี้ (ไม่นับคนส่ง และคนที่เข้าห้องหลังข้อความนี้) ----------
+  function readersOf(m: ChatMessage): ReadState[] {
+    const out: ReadState[] = [];
+    for (const r of s.reads.values()) {
+      if (r.userId !== m.senderId && r.seq >= m.seq && r.joinedAt <= m.createdAt) out.push(r);
+    }
+    return out;
+  }
+  const isRoomAdmin = !!room && (room.myRole === 'owner' || room.myRole === 'admin');
+
+  // ---------- กดค้าง (มือถือ) / คลิกขวา (คอม) ที่ข้อความ = เปิดเมนู ----------
+  function pressStart(m: ChatMessage) {
+    if (m.deleted) return;
+    clearTimeout(pressTimer.current);
+    pressTimer.current = window.setTimeout(() => setMenuFor(m), 500);
+  }
+  const pressEnd = () => clearTimeout(pressTimer.current);
   const connText =
     s.conn === 'connecting' ? 'กำลังเชื่อมต่อ…'
     : s.conn === 'reconnecting' ? (s.connError ?? 'หลุดการเชื่อมต่อ กำลังต่อใหม่…')
@@ -242,6 +275,7 @@ export default function ChatRoomPage() {
         }
         right={room && (
           <>
+            <button className="btn btn-small btn-ghost" onClick={() => setShowSearch(true)} aria-label="ค้นหาข้อความในห้องนี้">🔍</button>
             <Link to={`/room/${encodeURIComponent(id)}/notes`} className="btn btn-small btn-ghost" aria-label="โน้ตของห้องนี้">📝</Link>
             <button className="btn btn-small btn-ghost" onClick={() => setShowRoomMenu(true)} aria-label="เมนูห้อง">⋯</button>
             <button className="btn btn-small btn-ghost" onClick={() => setShowMute(true)} aria-label="ตั้งค่าแจ้งเตือนห้องนี้">
@@ -253,7 +287,7 @@ export default function ChatRoomPage() {
       {connText && <div className={`banner ${s.conn === 'failed' ? 'banner-error' : 'banner-warning'}`} role="status">{connText}</div>}
       {room?.pinned && (
         <div className="pinned-bar">
-          <button className="pinned-main" onClick={() => jumpTo(room.pinned!.seq)}>
+          <button className="pinned-main" onClick={() => void jumpTo(room.pinned!.seq)}>
             <span className="small muted">📌 ข้อความที่ปักหมุด{room.pinned.sender ? ` · ${room.pinned.sender}` : ''}</span>
             <span className="pinned-text">{room.pinned.text}</span>
           </button>
@@ -268,23 +302,44 @@ export default function ChatRoomPage() {
           const showDate = d !== lastDate;
           lastDate = d;
           const mine = m.senderId === me.user.id;
+          // อ่านแล้ว (ผู้ใช้เลือกแบบ LINE): 1:1 / กลุ่ม = ข้อความของเรา · ชาเนล = เจ้าของ/แอดมินเห็นจำนวนทุกโพสต์
+          const showReads = !m.deleted && (isChannel ? isRoomAdmin : mine);
+          const readers = showReads ? readersOf(m) : [];
+          const myReaction = m.reactions?.find((g) => g.users.some((u) => u.id === me.user.id))?.emoji ?? null;
           return (
             <div key={m.seq}>
               {showDate && <div className="date-sep">{d}</div>}
               <div className={`bubble-row ${mine ? 'mine' : ''}`} id={`msg-${m.seq}`}>
-                <div className={`bubble ${m.kind === 'sticker' ? 'bubble-sticker' : ''}`}>
+                <div
+                  className={`bubble ${m.kind === 'sticker' ? 'bubble-sticker' : ''}`}
+                  onContextMenu={(e) => { if (!m.deleted) { e.preventDefault(); setMenuFor(m); } }}
+                  onTouchStart={() => pressStart(m)} onTouchEnd={pressEnd} onTouchMove={pressEnd}
+                >
                   {!mine && isGroup && <div className="bubble-name">{m.senderName}</div>}
+                  {!m.deleted && m.extra?.forwardedFrom && <div className="forwarded">↪️ ส่งต่อจาก {m.extra.forwardedFrom}</div>}
                   {m.deleted ? (
                     <div className="bubble-deleted">{m.deleted.by === 'admin' ? '🚫 ข้อความถูกลบโดยแอดมิน' : '🚫 ข้อความถูกยกเลิก'}</div>
                   ) : null}
                   {!m.deleted && m.extra?.replyTo && (
-                    <button className="reply-quote" onClick={() => jumpTo(m.extra!.replyTo!.seq)}>
+                    <button className="reply-quote" onClick={() => void jumpTo(m.extra!.replyTo!.seq)}>
                       <b>{m.extra.replyTo.senderName ?? 'ข้อความ'}</b>
                       <span>{m.extra.replyTo.snippet ?? ''}</span>
                     </button>
                   )}
                   {!m.deleted && <MessageContent m={m} roomId={id} />}
+                  {!m.deleted && !!m.reactions?.length && (
+                    <button className="reaction-chips" onClick={() => setReactionsFor(m)} aria-label="ดูว่าใครกดรีแอคชัน">
+                      {m.reactions.map((g) => (
+                        <span key={g.emoji} className={g.emoji === myReaction ? 'chip-mine' : ''}>{g.emoji} {g.users.length}</span>
+                      ))}
+                    </button>
+                  )}
                   <div className="bubble-meta">
+                    {readers.length > 0 && (
+                      room?.type === 'dm' ? <span className="read-mark">อ่านแล้ว </span>
+                      : isChannel ? <span className="read-mark" title="จำนวนคนที่อ่านแล้ว">👁 {readers.length} </span>
+                      : <button className="read-mark link" onClick={() => setReadersFor(readers)}>อ่านแล้ว {readers.length} </button>
+                    )}
                     {m.extra?.silent && <span title="ส่งแบบเงียบ">🔕 </span>}
                     {thaiClock(m.createdAt)}
                     {!m.deleted && <button className="bubble-more" onClick={() => setMenuFor(m)} aria-label="ตัวเลือกข้อความ">⋯</button>}
@@ -428,9 +483,28 @@ export default function ChatRoomPage() {
           onUnpin={() => { void pin(null); setMenuFor(null); }}
           onCopy={async () => {
             setMenuFor(null);
-            try { await navigator.clipboard.writeText(menuFor.body); notify('success', 'คัดลอกข้อความแล้ว'); }
-            catch { notify('error', 'คัดลอกไม่สำเร็จ — เบราว์เซอร์ไม่อนุญาตให้เข้าถึงคลิปบอร์ด'); }
+            if (await copyText(menuFor.body)) notify('success', 'คัดลอกข้อความแล้ว');
+            else notify('error', 'คัดลอกไม่สำเร็จ — เบราว์เซอร์ไม่อนุญาตให้เข้าถึงคลิปบอร์ด (ลองลากเลือกข้อความแล้วคัดลอกเอง)');
           }}
+          myReaction={menuFor.reactions?.find((g) => g.users.some((u) => u.id === me.user.id))?.emoji ?? null}
+          canReact={s.conn === 'open'}
+          onReact={(emoji) => { s.react(menuFor.seq, emoji); setMenuFor(null); }}
+          canForward={menuFor.kind !== 'form' || me.user.role === 'admin'}
+          onForward={() => { setForwardFor(menuFor); setMenuFor(null); }}
+        />
+      )}
+
+      {showSearch && (
+        <SearchSheet roomId={id} onClose={() => setShowSearch(false)} onPick={(seq) => { setShowSearch(false); void jumpTo(seq); }} />
+      )}
+      {forwardFor && <ForwardSheet m={forwardFor} roomId={id} onClose={() => setForwardFor(null)} />}
+      {readersFor && <ReadersSheet readers={readersFor} onClose={() => setReadersFor(null)} />}
+      {reactionsFor && (
+        <ReactionsSheet
+          groups={s.messages.find((x) => x.seq === reactionsFor.seq)?.reactions ?? []}
+          meId={me.user.id}
+          onRemoveMine={() => { s.react(reactionsFor.seq, null); setReactionsFor(null); }}
+          onClose={() => setReactionsFor(null)}
         />
       )}
 
@@ -469,17 +543,30 @@ function previewText(m: ChatMessage): string {
 
 const UNSEND_MS = 24 * 3600_000; // ต้องตรงกับ UNSEND_WINDOW_MS ใน worker/room.ts (เซิร์ฟเวอร์ตรวจซ้ำเสมอ)
 
-function MessageMenu({ m, canReply, canPin, isPinned, canUnsend, canModerate, onDelete, onClose, onReply, onPin, onUnpin, onCopy }: {
+function MessageMenu({
+  m, canReply, canPin, isPinned, canUnsend, canModerate, onDelete, onClose, onReply, onPin, onUnpin, onCopy,
+  myReaction, canReact, onReact, canForward, onForward,
+}: {
   m: ChatMessage; canReply: boolean; canPin: boolean; isPinned: boolean; canUnsend: boolean; canModerate: boolean;
   onDelete: (asAdmin: boolean) => void; onClose: () => void;
   onReply: () => void; onPin: (notifyAll: boolean) => void; onUnpin: () => void; onCopy: () => void;
+  myReaction: string | null; canReact: boolean; onReact: (emoji: string | null) => void;
+  canForward: boolean; onForward: () => void;
 }) {
   return (
     <div className="sheet-backdrop" onClick={onClose}>
       <div className="sheet" onClick={(e) => e.stopPropagation()}>
         <div className="sheet-head"><b className="ellipsis">{m.senderName}: {previewText(m)}</b><button className="link" onClick={onClose}>ปิด</button></div>
+        <div className="reaction-picker" role="group" aria-label="กดรีแอคชัน">
+          {REACTIONS.map((e) => (
+            <button key={e} className={e === myReaction ? 'on' : ''} disabled={!canReact}
+              onClick={() => onReact(e === myReaction ? null : e)} aria-pressed={e === myReaction}>{e}</button>
+          ))}
+        </div>
+        {!canReact && <p className="small muted">ยังไม่ได้เชื่อมต่อกับห้อง — กดรีแอคชันไม่ได้ชั่วคราว</p>}
         {canReply && <button className="btn btn-ghost btn-block" onClick={onReply}>↩️ ตอบกลับ</button>}
         {m.body && <button className="btn btn-ghost btn-block" onClick={onCopy}>📋 คัดลอกข้อความ</button>}
+        {canForward && <button className="btn btn-ghost btn-block" onClick={onForward}>↪️ ส่งต่อ</button>}
         {canPin && !isPinned && (
           <>
             <button className="btn btn-ghost btn-block" onClick={() => onPin(false)}>📌 ปักหมุด (ไม่แจ้งใคร)</button>
@@ -777,3 +864,208 @@ function MembersPanel({ room, members, onClose, onChanged }: {
     </div>
   );
 }
+
+// ---------------------------------------------------------------------
+// ฟีเจอร์แชท (2026-11-17): คัดลอก · ค้นหา · ส่งต่อ · ใครอ่านแล้ว · ใครกดรีแอคชัน
+// ---------------------------------------------------------------------
+/** คัดลอกข้อความ — เบราว์เซอร์ในแอป/หน้า http บางที่ไม่มี clipboard API → ใช้วิธีเก่า (execCommand) แทน */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (err) {
+    console.warn('clipboard API ใช้ไม่ได้ ลองวิธีสำรอง', err);
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  let okCopy = false;
+  try {
+    okCopy = document.execCommand('copy');
+  } catch (err) {
+    console.warn('คัดลอกวิธีสำรองไม่สำเร็จ', err);
+  }
+  ta.remove();
+  return okCopy;
+}
+
+/** ไฮไลต์คำที่ค้นในข้อความ */
+function Highlight({ text, q }: { text: string; q: string }) {
+  const i = text.toLowerCase().indexOf(q.toLowerCase());
+  if (!q || i < 0) return <>{text}</>;
+  const start = Math.max(0, i - 30);
+  return <>{start > 0 ? '…' : ''}{text.slice(start, i)}<mark>{text.slice(i, i + q.length)}</mark>{text.slice(i + q.length, i + q.length + 80)}</>;
+}
+
+function SearchSheet({ roomId, onClose, onPick }: { roomId: string; onClose: () => void; onPick: (seq: number) => void }) {
+  const [q, setQ] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [res, setRes] = useState<{ q: string; messages: ChatMessage[]; more: boolean } | null>(null);
+
+  useEffect(() => {
+    const term = q.trim();
+    if (!term) { setRes(null); setError(''); return; }
+    if (term.length > 100) { setError('คำค้นยาวเกิน 100 ตัวอักษร'); return; }
+    let cancelled = false;
+    const t = window.setTimeout(async () => {
+      setBusy(true);
+      try {
+        const d = await api.get<{ messages: ChatMessage[]; more: boolean }>(
+          `/api/rooms/${encodeURIComponent(roomId)}/search?q=${encodeURIComponent(term)}`,
+        );
+        if (!cancelled) { setRes({ q: term, ...d }); setError(''); }
+      } catch (e) {
+        if (!cancelled) setError(`ค้นหาไม่สำเร็จ: ${errMsg(e)}`);
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    }, 350);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [q, roomId]);
+
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head"><b>🔍 ค้นหาข้อความในห้องนี้</b><button className="link" onClick={onClose}>ปิด</button></div>
+        <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="พิมพ์คำที่ต้องการค้น (ข้อความ / ชื่อไฟล์)" maxLength={120} />
+        {busy && <p className="small muted">กำลังค้นหา…</p>}
+        {error && <p className="error-text small">{error}</p>}
+        {res && !error && (
+          res.messages.length === 0 ? <p className="small muted">ไม่พบข้อความที่มีคำว่า "{res.q}"</p> : (
+            <ul className="search-results">
+              {res.messages.map((m) => (
+                <li key={m.seq}>
+                  <button onClick={() => onPick(m.seq)}>
+                    <span className="small muted">{m.senderName} · {thaiDate(m.createdAt)} {thaiClock(m.createdAt)}</span>
+                    <span><Highlight text={m.body || m.file?.name || previewText(m)} q={res.q} /></span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )
+        )}
+        {res?.more && <p className="small muted">แสดง 50 ข้อความล่าสุดที่ตรง — พิมพ์คำให้เจาะจงขึ้นเพื่อหาข้อความที่เก่ากว่า</p>}
+      </div>
+    </div>
+  );
+}
+
+const FORWARD_MAX = 10; // ต้องตรงกับ FORWARD_MAX_TARGETS ใน worker/index.ts (เซิร์ฟเวอร์ตรวจซ้ำ)
+
+function ForwardSheet({ m, roomId, onClose }: { m: ChatMessage; roomId: string; onClose: () => void }) {
+  const notify = useNotify();
+  const [rooms, setRooms] = useState<Room[] | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [q, setQ] = useState('');
+  const [picked, setPicked] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [results, setResults] = useState<{ roomId: string; ok: boolean; error?: { message: string } }[] | null>(null);
+
+  useEffect(() => {
+    api.get<{ rooms: Room[] }>('/api/rooms')
+      .then((d) => setRooms(d.rooms.filter((r) => r.id !== roomId)))
+      .catch((e) => setLoadError(`โหลดรายการแชทไม่สำเร็จ: ${errMsg(e)}`));
+  }, [roomId]);
+
+  const shown = (rooms ?? []).filter((r) => r.title.toLowerCase().includes(q.trim().toLowerCase()));
+  const titleOf = (id: string) => rooms?.find((r) => r.id === id)?.title ?? 'ห้อง';
+  function toggle(id: string) {
+    setPicked((p) => {
+      if (p.includes(id)) return p.filter((x) => x !== id);
+      if (p.length >= FORWARD_MAX) { notify('warning', `ส่งต่อได้ครั้งละไม่เกิน ${FORWARD_MAX} ห้อง`); return p; }
+      return [...p, id];
+    });
+  }
+  async function send() {
+    setBusy(true);
+    try {
+      const d = await api.post<{ results: { roomId: string; ok: boolean; error?: { message: string } }[]; sent: number }>(
+        `/api/rooms/${encodeURIComponent(roomId)}/messages/${m.seq}/forward`, { targets: picked },
+      );
+      setResults(d.results);
+      if (d.sent === d.results.length) notify('success', `ส่งต่อแล้ว ${d.sent} ห้อง`);
+      else notify('warning', `ส่งต่อได้ ${d.sent} จาก ${d.results.length} ห้อง — ดูเหตุผลของห้องที่ส่งไม่ได้ในหน้าต่างนี้`);
+    } catch (e) {
+      notify('error', `ส่งต่อไม่สำเร็จ: ${errMsg(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head"><b className="ellipsis">↪️ ส่งต่อ: {previewText(m)}</b><button className="link" onClick={onClose}>ปิด</button></div>
+        {results ? (
+          <>
+            <ul className="menu-list">
+              {results.map((r) => (
+                <li key={r.roomId} className={r.ok ? '' : 'error-text'}>
+                  {r.ok ? '✅' : '❌'} {titleOf(r.roomId)}{r.ok ? '' : ` — ${r.error?.message ?? 'ส่งไม่ได้'}`}
+                </li>
+              ))}
+            </ul>
+            <button className="btn btn-block" onClick={onClose}>เสร็จ</button>
+          </>
+        ) : (
+          <>
+            <p className="small muted">คนรับจะเห็น "ส่งต่อจาก {m.extra?.forwardedFrom ?? m.senderName}" · เลือกได้ไม่เกิน {FORWARD_MAX} ห้อง</p>
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อแชท" />
+            {loadError && <p className="error-text small">{loadError}</p>}
+            {!rooms && !loadError && <p className="small muted">กำลังโหลด…</p>}
+            <ul className="user-list">
+              {shown.map((r) => (
+                <li key={r.id} className="user-item">
+                  <label className="grow forward-pick">
+                    <input type="checkbox" checked={picked.includes(r.id)} disabled={!r.canPost} onChange={() => toggle(r.id)} />
+                    <Avatar name={r.title} url={r.picture} size={28} />
+                    <span>{r.type === 'channel' ? '📢 ' : r.type === 'group' ? '👥 ' : ''}{r.title}</span>
+                    {!r.canPost && <span className="small muted"> · โพสต์ไม่ได้</span>}
+                  </label>
+                </li>
+              ))}
+            </ul>
+            <button className="btn btn-block" disabled={busy || picked.length === 0} onClick={() => void send()}>
+              {busy ? 'กำลังส่งต่อ…' : `ส่งต่อ${picked.length ? ` (${picked.length} ห้อง)` : ''}`}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ReadersSheet({ readers, onClose }: { readers: ReadState[]; onClose: () => void }) {
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head"><b>อ่านแล้ว {readers.length} คน</b><button className="link" onClick={onClose}>ปิด</button></div>
+        <ul className="menu-list">{readers.map((r) => <li key={r.userId}>👁 {r.name ?? 'สมาชิก'}</li>)}</ul>
+      </div>
+    </div>
+  );
+}
+
+function ReactionsSheet({ groups, meId, onRemoveMine, onClose }: {
+  groups: ReactionGroup[]; meId: string; onRemoveMine: () => void; onClose: () => void;
+}) {
+  const mine = groups.some((g) => g.users.some((u) => u.id === meId));
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head"><b>รีแอคชัน</b><button className="link" onClick={onClose}>ปิด</button></div>
+        {groups.length === 0 && <p className="small muted">ยังไม่มีใครกดรีแอคชัน</p>}
+        <ul className="menu-list">
+          {groups.flatMap((g) => g.users.map((u) => <li key={`${g.emoji}-${u.id}`}>{g.emoji} {u.name}{u.id === meId ? ' (คุณ)' : ''}</li>))}
+        </ul>
+        {mine && <button className="btn btn-ghost btn-block" onClick={onRemoveMine}>เอารีแอคชันของฉันออก</button>}
+      </div>
+    </div>
+  );
+}
+
