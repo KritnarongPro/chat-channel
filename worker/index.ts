@@ -92,11 +92,14 @@ const routes: Route[] = [
   { method: 'GET',  pattern: '/api/channels',                 need: 'active', handler: listChannels },
   { method: 'POST', pattern: '/api/rooms/channel',            need: 'admin',  handler: createChannel },
   { method: 'POST', pattern: '/api/rooms/:id/join',           need: 'active', handler: joinChannel },
-  { method: 'POST', pattern: '/api/rooms/:id/leave',          need: 'active', handler: leaveChannel },
+  { method: 'POST', pattern: '/api/rooms/:id/leave',          need: 'active', handler: leaveRoom },
   { method: 'POST', pattern: '/api/rooms/:id/members/:userId/role', need: 'active', handler: setMemberRole },
 
   // ---------- messages (ส่งต่อไปที่ห้อง = Durable Object) ----------
   { method: 'GET',  pattern: '/api/rooms/:id/messages',       need: 'active', handler: history },
+  // ---------- ลบแชท (2026-11-17): ยกเลิกส่ง 24 ชม. / แอดมินลบ · ล้างแชทฝั่งฉัน ----------
+  { method: 'POST', pattern: '/api/rooms/:id/messages/:seq/delete', need: 'active', handler: deleteMessage },
+  { method: 'POST', pattern: '/api/rooms/:id/clear',          need: 'active', handler: clearChat },
   { method: 'GET',  pattern: '/api/rooms/:id/ws',             need: 'active', handler: openSocket },
 
   // ---------- files (รูป / ไฟล์ / เสียง — ตัวไฟล์อยู่ใน R2 เปิดได้เฉพาะสมาชิกห้อง) ----------
@@ -377,6 +380,7 @@ type RoomListRow = {
   created_at: string; last_read_seq: number; my_role: string; peer_name: string | null; peer_picture: string | null;
   visibility: 'public' | 'private' | null; description: string | null; muted: number; muted_until: string | null;
   pinned_seq: number | null; pinned_text: string | null; pinned_sender: string | null; pinned_at: string | null;
+  cleared_seq: number | null;  // 0009: ล้างแชทฝั่งฉันถึงลำดับนี้
 };
 
 async function listRooms(c: Ctx) {
@@ -384,13 +388,14 @@ async function listRooms(c: Ctx) {
     c.env.DB.prepare(
       `SELECT r.id, r.type, r.title, r.last_seq, r.last_message_at, r.last_message_preview, r.last_sender_name,
               r.created_at, r.visibility, r.description, m.last_read_seq, m.role AS my_role, m.muted, m.muted_until,
-              r.pinned_seq, r.pinned_text, r.pinned_sender, r.pinned_at,
+              r.pinned_seq, r.pinned_text, r.pinned_sender, r.pinned_at, m.cleared_seq,
               (SELECT u.display_name FROM room_members m2 JOIN users u ON u.id = m2.user_id
                  WHERE m2.room_id = r.id AND m2.user_id <> ?1 LIMIT 1) AS peer_name,
               (SELECT u.picture_url FROM room_members m2 JOIN users u ON u.id = m2.user_id
                  WHERE m2.room_id = r.id AND m2.user_id <> ?1 LIMIT 1) AS peer_picture
        FROM room_members m JOIN rooms r ON r.id = m.room_id
        WHERE m.user_id = ?1
+         AND NOT (m.cleared_seq > 0 AND r.last_seq <= m.cleared_seq)  -- ลบแชทออกจากรายการแล้ว และยังไม่มีข้อความใหม่
        ORDER BY COALESCE(r.last_message_at, r.created_at) DESC`,
     ).bind(c.user!.id).all<RoomListRow>(),
   );
@@ -514,13 +519,13 @@ async function getRoom(c: Ctx) {
   const { room } = await requireMember(c.env, c.params.id, c.user!.id);
   const members = await db('อ่านสมาชิกห้อง', () =>
     c.env.DB.prepare(
-      `SELECT u.id, u.display_name, u.picture_url, m.role FROM room_members m JOIN users u ON u.id = m.user_id
+      `SELECT u.id, u.display_name, u.picture_url, u.is_bot, m.role FROM room_members m JOIN users u ON u.id = m.user_id
        WHERE m.room_id = ? ORDER BY m.role = 'owner' DESC, u.display_name`,
-    ).bind(c.params.id).all<{ id: string; display_name: string; picture_url: string | null; role: string }>(),
+    ).bind(c.params.id).all<{ id: string; display_name: string; picture_url: string | null; is_bot: number; role: string }>(),
   );
   return ok({
     room: roomOut(room),
-    members: members.results.map((m) => ({ id: m.id, displayName: m.display_name, pictureUrl: m.picture_url, role: m.role })),
+    members: members.results.map((m) => ({ id: m.id, displayName: m.display_name, pictureUrl: m.picture_url, role: m.role, isBot: m.is_bot === 1 })),
   });
 }
 
@@ -620,8 +625,9 @@ async function pinMessage(c: Ctx) {
   } else {
     if (typeof body.seq !== 'number' || !Number.isInteger(body.seq)) throw new ApiError(400, 'BAD_SEQ', 'ระบุข้อความที่จะปักหมุดไม่ถูกต้อง');
     const res = await stub.fetch(new Request(`https://room/message?seq=${body.seq}`, { headers: { 'X-Room-Id': c.params.id } }));
-    const j = (await res.json()) as { ok: boolean; data?: { message: { senderName: string }; preview: string }; error?: { code: string; message: string } };
+    const j = (await res.json()) as { ok: boolean; data?: { message: { senderName: string; deleted?: unknown }; preview: string }; error?: { code: string; message: string } };
     if (!j.ok || !j.data) throw new ApiError(404, j.error?.code ?? 'MESSAGE_NOT_FOUND', j.error?.message ?? 'ไม่พบข้อความนี้');
+    if (j.data.message.deleted) throw new ApiError(400, 'MESSAGE_DELETED', 'ข้อความนี้ถูกลบแล้ว ปักหมุดไม่ได้');
     await db('ปักหมุดข้อความ', () =>
       c.env.DB.prepare(`UPDATE rooms SET pinned_seq = ?, pinned_text = ?, pinned_sender = ?, pinned_by = ?, pinned_at = ? WHERE id = ?`)
         .bind(body.seq, j.data!.preview.slice(0, 300), j.data!.message.senderName, c.user!.id, now, c.params.id).run(),
@@ -752,14 +758,127 @@ async function joinChannel(c: Ctx) {
   return ok({ joined: true });
 }
 
-async function leaveChannel(c: Ctx) {
+/**
+ * ออกจากห้อง
+ *   ชาเนล: เลิกติดตาม (เจ้าของชาเนลออกไม่ได้ — เหมือนเดิม)
+ *   กลุ่ม (2026-11-17): สมาชิกออกเองได้ · เจ้าของต้องเลือกคนรับต่อ (transferTo) ก่อน (ผู้ใช้เลือก)
+ *   แจ้งในห้องแบบเงียบ "X ออกจากกลุ่ม" (โพสต์ก่อนออก เพราะต้องยังเป็นสมาชิกถึงโพสต์ได้)
+ */
+async function leaveRoom(c: Ctx) {
   const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
-  if (room.type !== 'channel') throw new ApiError(400, 'NOT_CHANNEL', 'เลิกติดตามได้เฉพาะชาเนล');
-  if (role === 'owner') throw new ApiError(400, 'OWNER_CANNOT_LEAVE', 'เจ้าของชาเนลเลิกติดตามไม่ได้');
-  await db('เลิกติดตามชาเนล', () =>
-    c.env.DB.prepare(`DELETE FROM room_members WHERE room_id = ? AND user_id = ?`).bind(c.params.id, c.user!.id).run(),
+  if (room.type === 'dm') throw new ApiError(400, 'DM_NO_LEAVE', 'แชท 1:1 ออกไม่ได้ — ใช้ "ลบแชท" เพื่อเอาออกจากรายการแทน');
+  if (room.type === 'channel') {
+    if (role === 'owner') throw new ApiError(400, 'OWNER_CANNOT_LEAVE', 'เจ้าของชาเนลเลิกติดตามไม่ได้');
+    await db('เลิกติดตามชาเนล', () =>
+      c.env.DB.prepare(`DELETE FROM room_members WHERE room_id = ? AND user_id = ?`).bind(c.params.id, c.user!.id).run(),
+    );
+    return ok({ left: true });
+  }
+
+  // ---------- กลุ่ม ----------
+  const body = await readJson<{ transferTo?: unknown }>(c.req);
+  let heir: { id: string; display_name: string } | null = null;
+  if (role === 'owner') {
+    const others = await db('นับสมาชิกกลุ่ม', () =>
+      c.env.DB.prepare(`SELECT COUNT(*) AS n FROM room_members WHERE room_id = ? AND user_id <> ?`).bind(c.params.id, c.user!.id)
+        .first<{ n: number }>(),
+    );
+    if ((others?.n ?? 0) > 0) {
+      if (typeof body.transferTo !== 'string' || !body.transferTo) {
+        throw new ApiError(400, 'NEED_TRANSFER', 'คุณเป็นเจ้าของกลุ่ม — เลือกคนรับเป็นเจ้าของต่อก่อนออก');
+      }
+      heir = await db('อ่านผู้รับเจ้าของกลุ่ม', () =>
+        c.env.DB.prepare(
+          `SELECT u.id, u.display_name FROM room_members m JOIN users u ON u.id = m.user_id
+           WHERE m.room_id = ? AND m.user_id = ? AND m.user_id <> ? AND u.is_bot = 0 AND u.status = 'active'`,
+        ).bind(c.params.id, body.transferTo, c.user!.id).first<{ id: string; display_name: string }>(),
+      );
+      if (!heir) throw new ApiError(400, 'BAD_TRANSFER', 'ผู้รับต่อต้องเป็นสมาชิกกลุ่มที่ใช้งานอยู่ (ไม่ใช่บอท)');
+    }
+  }
+  // แจ้งก่อนออก — แจ้งไม่สำเร็จไม่ขวางการออก แต่ตอบคำเตือนพร้อมเหตุผล
+  let warning: string | null = null;
+  try {
+    await postToRoom(c.env, c.params.id, c.user!, {
+      kind: 'text', extra: { silent: true },
+      body: heir ? `👋 ${c.user!.displayName} ออกจากกลุ่ม และโอนเจ้าของให้ ${heir.display_name}` : `👋 ${c.user!.displayName} ออกจากกลุ่ม`,
+    });
+  } catch (err) {
+    console.error('แจ้งออกจากกลุ่มในห้องไม่สำเร็จ', err);
+    warning = `ออกจากกลุ่มแล้ว แต่แจ้งในห้องไม่สำเร็จ: ${err instanceof ApiError ? err.message : 'ระบบขัดข้อง'}`;
+  }
+  const stmts = [c.env.DB.prepare(`DELETE FROM room_members WHERE room_id = ? AND user_id = ?`).bind(c.params.id, c.user!.id)];
+  if (heir) stmts.unshift(c.env.DB.prepare(`UPDATE room_members SET role = 'owner' WHERE room_id = ? AND user_id = ?`).bind(c.params.id, heir.id));
+  await db('ออกจากกลุ่ม', () => c.env.DB.batch(stmts)); // โอนเจ้าของ + ออก ในคราวเดียว (ล้มทั้งคู่ ไม่ค้างครึ่งทาง)
+  try {
+    await roomStub(c.env, c.params.id).fetch(new Request('https://room/broadcast', { method: 'POST', headers: { 'X-Room-Id': c.params.id } }));
+  } catch (err) {
+    console.error('แจ้งอัปเดตสมาชิกให้คนที่เปิดห้องอยู่ไม่สำเร็จ', err);
+  }
+  return ok({ left: true, newOwner: heir?.id ?? null, warning });
+}
+
+/** ยกเลิกส่ง (ของตัวเอง ภายใน 24 ชม.) / แอดมินห้องลบข้อความใครก็ได้ — ไฟล์ที่แนบถูกลบจาก R2 ด้วย */
+async function deleteMessage(c: Ctx) {
+  const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
+  const seq = Number(c.params.seq);
+  if (!Number.isInteger(seq) || seq < 1) throw new ApiError(400, 'BAD_SEQ', 'ระบุข้อความที่จะลบไม่ถูกต้อง');
+  const canModerate = room.type !== 'dm' && (role === 'owner' || role === 'admin');
+  const res = await roomStub(c.env, c.params.id).fetch(new Request('https://room/delete', {
+    method: 'POST',
+    headers: { 'X-Room-Id': c.params.id, 'content-type': 'application/json' },
+    body: JSON.stringify({ seq, userId: c.user!.id, canModerate }),
+  }));
+  const j = (await res.json()) as {
+    ok: boolean; data?: { by: 'sender' | 'admin'; fileId: string | null; wasLast: boolean };
+    error?: { code: string; message: string };
+  };
+  if (!j.ok || !j.data) throw new ApiError(res.status, j.error?.code ?? 'DELETE_FAILED', j.error?.message ?? 'ลบข้อความไม่สำเร็จ');
+  const { by, fileId, wasLast } = j.data;
+
+  // ---------- งานตามหลัง: ลบแล้วจริงในห้อง — ส่วนที่ทำไม่สำเร็จแจ้งเป็นคำเตือน (ไม่เงียบ) ----------
+  const warnings: string[] = [];
+  const label = by === 'admin' ? '🚫 ข้อความถูกลบโดยแอดมิน' : '🚫 ข้อความถูกยกเลิก';
+  try {
+    const stmts = [c.env.DB.prepare(`UPDATE rooms SET pinned_seq = NULL, pinned_text = NULL, pinned_sender = NULL, pinned_by = NULL, pinned_at = NULL WHERE id = ? AND pinned_seq = ?`).bind(c.params.id, seq)];
+    if (wasLast) stmts.push(c.env.DB.prepare(`UPDATE rooms SET last_message_preview = ? WHERE id = ? AND last_seq = ?`).bind(label, c.params.id, seq));
+    await c.env.DB.batch(stmts);
+  } catch (err) {
+    console.error('อัปเดตรายการแชท/ปักหมุดหลังลบข้อความไม่สำเร็จ', err);
+    warnings.push('ลบข้อความแล้ว แต่ข้อความย่อในรายการแชทหรือแถบปักหมุดอาจยังแสดงของเดิม');
+  }
+  if (fileId) {
+    try {
+      const f = await c.env.DB.prepare(`SELECT r2_key FROM files WHERE id = ? AND room_id = ?`).bind(fileId, c.params.id).first<{ r2_key: string }>();
+      if (f) {
+        await c.env.FILES.delete(f.r2_key);
+        await c.env.DB.prepare(`UPDATE files SET status = 'expired' WHERE id = ?`).bind(fileId).run();
+      }
+    } catch (err) {
+      console.error('ลบไฟล์ของข้อความที่ลบไม่สำเร็จ', fileId, err);
+      warnings.push('ลบข้อความแล้ว แต่ลบไฟล์แนบออกจากที่เก็บไม่สำเร็จ (ระบบจะลบเองเมื่อครบ 180 วัน)');
+    }
+  }
+  try {
+    await roomStub(c.env, c.params.id).fetch(new Request('https://room/broadcast', { method: 'POST', headers: { 'X-Room-Id': c.params.id } }));
+  } catch (err) {
+    console.error('แจ้งอัปเดตห้องหลังลบข้อความไม่สำเร็จ', err);
+  }
+  return ok({ deleted: true, by, warnings });
+}
+
+/** ลบแชทฝั่งฉัน: ล้างประวัติ + เอาออกจากรายการ (อีกฝ่ายยังเห็นครบ) · มีข้อความใหม่ห้องกลับมาเอง */
+async function clearChat(c: Ctx) {
+  await requireMember(c.env, c.params.id, c.user!.id);
+  const r = await db('ลบแชทฝั่งฉัน', () =>
+    c.env.DB.prepare(
+      `UPDATE room_members SET cleared_seq = (SELECT last_seq FROM rooms WHERE id = ?1),
+                               last_read_seq = (SELECT last_seq FROM rooms WHERE id = ?1)
+       WHERE room_id = ?1 AND user_id = ?2`,
+    ).bind(c.params.id, c.user!.id).run(),
   );
-  return ok({ left: true });
+  if (r.meta.changes !== 1) throw new ApiError(404, 'NOT_MEMBER', 'คุณไม่ได้เป็นสมาชิกห้องนี้');
+  return ok({ cleared: true });
 }
 
 /** เจ้าของชาเนล/กลุ่ม ตั้งหรือถอดแอดมินของห้อง */
@@ -780,11 +899,12 @@ async function setMemberRole(c: Ctx) {
 
 // ---------- messages ----------
 async function history(c: Ctx) {
-  await requireMember(c.env, c.params.id, c.user!.id);
+  const { room } = await requireMember(c.env, c.params.id, c.user!.id);
   const before = c.url.searchParams.get('before') ?? '';
   const limit = c.url.searchParams.get('limit') ?? String(HISTORY_LIMIT);
   const stub = roomStub(c.env, c.params.id);
-  return stub.fetch(new Request(`https://room/history?before=${encodeURIComponent(before)}&limit=${encodeURIComponent(limit)}`, {
+  const after = room.cleared_seq ?? 0; // ล้างแชทฝั่งฉันแล้ว → ไม่ส่งข้อความก่อนจุดนั้น
+  return stub.fetch(new Request(`https://room/history?before=${encodeURIComponent(before)}&limit=${encodeURIComponent(limit)}&after=${after}`, {
     headers: { 'X-Room-Id': c.params.id },
   }));
 }
@@ -793,13 +913,14 @@ async function openSocket(c: Ctx) {
   if (c.req.headers.get('Upgrade') !== 'websocket') {
     throw new ApiError(426, 'NOT_WEBSOCKET', 'ต้องเชื่อมต่อแบบ WebSocket');
   }
-  await requireMember(c.env, c.params.id, c.user!.id);
+  const { room } = await requireMember(c.env, c.params.id, c.user!.id);
   const stub = roomStub(c.env, c.params.id);
   return stub.fetch(new Request('https://room/ws', {
     headers: {
       Upgrade: 'websocket',
       'X-Room-Id': c.params.id,
       'X-User-Id': c.user!.id,
+      'X-Cleared-Seq': String(room.cleared_seq ?? 0),
       'X-User-Name': encodeURIComponent(c.user!.displayName),
     },
   }));
@@ -1960,7 +2081,7 @@ async function requireMember(env: Env, roomId: string, userId: string) {
     env.DB.prepare(
       `SELECT r.id, r.type, r.title, r.last_seq, r.last_message_at, r.last_message_preview, r.last_sender_name,
               r.created_at, r.visibility, r.description, m.last_read_seq, m.role AS my_role, m.muted, m.muted_until,
-              r.pinned_seq, r.pinned_text, r.pinned_sender, r.pinned_at,
+              r.pinned_seq, r.pinned_text, r.pinned_sender, r.pinned_at, m.cleared_seq,
               (SELECT u.display_name FROM room_members m2 JOIN users u ON u.id = m2.user_id
                  WHERE m2.room_id = r.id AND m2.user_id <> ?2 LIMIT 1) AS peer_name,
               (SELECT u.picture_url FROM room_members m2 JOIN users u ON u.id = m2.user_id

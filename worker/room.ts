@@ -23,7 +23,7 @@ import type { PushJob } from './push';
 // =====================================================================
 // 0. โครงตารางในห้อง — ต้องตรงกับ do-schema.sql (check:rules ตรวจเลขเวอร์ชัน)
 // =====================================================================
-export const DO_SCHEMA_VERSION = 4;
+export const DO_SCHEMA_VERSION = 5;
 
 const DO_MIGRATIONS: Record<number, string[]> = {
   1: [
@@ -116,7 +116,15 @@ const DO_MIGRATIONS: Record<number, string[]> = {
     `DROP TABLE messages`,
     `ALTER TABLE messages_v4 RENAME TO messages`,
   ],
+  // v5 (ลบแชท): ยกเลิกส่ง / แอดมินลบ — เพิ่มคอลัมน์ได้ตรง ๆ (ไม่ได้แก้ CHECK เดิม จึงไม่ต้องสร้างตารางใหม่)
+  5: [
+    `ALTER TABLE messages ADD COLUMN deleted_at TEXT`,
+    `ALTER TABLE messages ADD COLUMN deleted_by TEXT`,
+  ],
 };
+
+/** ยกเลิกส่งข้อความของตัวเองได้ภายในเวลานี้ (ผู้ใช้เลือก 24 ชม. แบบ LINE) · แอดมินห้องลบได้ทุกเวลา */
+export const UNSEND_WINDOW_MS = 24 * 3600_000;
 
 type MsgRow = {
   seq: number; id: string; sender_id: string; sender_name: string;
@@ -124,6 +132,7 @@ type MsgRow = {
   file_id: string | null; file_name: string | null; file_mime: string | null; file_size: number | null;
   file_width: number | null; file_height: number | null; file_duration_ms: number | null; file_expires_at: string | null;
   extra: string | null;
+  deleted_at?: string | null; deleted_by?: string | null;  // v5
 };
 function parseExtra(raw: string | null): MessageExtra | null {
   if (!raw) return null;
@@ -134,7 +143,12 @@ function parseExtra(raw: string | null): MessageExtra | null {
     return null;
   }
 }
-const msgOut = (r: MsgRow): ChatMessage => ({
+const msgOut = (r: MsgRow): ChatMessage => (r.deleted_at ? {
+  // ข้อความที่ลบแล้ว: ส่งเฉพาะร่องรอย ไม่ส่งเนื้อหาเดิมออกไปอีก
+  seq: r.seq, id: r.id, senderId: r.sender_id, senderName: r.sender_name,
+  kind: 'text', body: '', createdAt: r.created_at, file: null, extra: null,
+  deleted: { at: r.deleted_at, by: r.deleted_by === 'admin' ? 'admin' : 'sender' },
+} : {
   seq: r.seq, id: r.id, senderId: r.sender_id, senderName: r.sender_name,
   kind: r.kind, body: r.body, createdAt: r.created_at,
   file: r.file_id
@@ -144,6 +158,7 @@ const msgOut = (r: MsgRow): ChatMessage => ({
       }
     : null,
   extra: parseExtra(r.extra),
+  deleted: null,
 });
 
 /** ข้อความย่อสำหรับหน้ารายการแชท */
@@ -167,7 +182,8 @@ type FileRow = {
 /** ช่องทางตอบผู้ส่ง: WebSocket ของคนส่ง หรือ ตัวเก็บผลสำหรับคำขอ HTTP จากบอท/ระบบ */
 type Reply = (frame: ServerFrame) => void;
 
-interface SocketInfo { userId: string; userName: string; visible: boolean }
+// clearedSeq (ลบแชท): คนนี้ล้างแชทฝั่งตัวเองถึงลำดับนี้ → ไม่ส่งข้อความ seq <= clearedSeq ให้
+interface SocketInfo { userId: string; userName: string; visible: boolean; clearedSeq?: number }
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -229,7 +245,8 @@ export class ChatRoom extends DurableObject<Env> {
       const pair = new WebSocketPair();
       const [client, server] = [pair[0], pair[1]];
       this.ctx.acceptWebSocket(server);
-      server.serializeAttachment({ userId, userName: decodeURIComponent(userName), visible: true } satisfies SocketInfo);
+      const clearedSeq = Math.max(0, Number(req.headers.get('X-Cleared-Seq') || 0) || 0);
+      server.serializeAttachment({ userId, userName: decodeURIComponent(userName), visible: true, clearedSeq } satisfies SocketInfo);
       return new Response(null, { status: 101, webSocket: client });
     }
 
@@ -237,11 +254,12 @@ export class ChatRoom extends DurableObject<Env> {
     if (url.pathname === '/history') {
       const before = Number(url.searchParams.get('before') || Number.MAX_SAFE_INTEGER);
       const limit = Math.min(Number(url.searchParams.get('limit') || HISTORY_LIMIT), HISTORY_LIMIT);
+      const after = Math.max(0, Number(url.searchParams.get('after') || 0) || 0); // ลบแชทฝั่งฉัน: ไม่ส่งข้อความก่อนจุดที่ล้าง
       if (!Number.isFinite(before) || !Number.isFinite(limit) || limit < 1) {
         return json({ ok: false, error: { code: 'BAD_QUERY', message: 'ค่า before/limit ไม่ถูกต้อง' } }, 400);
       }
       const rows = this.sql.exec<MsgRow>(
-        `SELECT * FROM messages WHERE seq < ? ORDER BY seq DESC LIMIT ?`, before, limit + 1,
+        `SELECT * FROM messages WHERE seq < ? AND seq > ? ORDER BY seq DESC LIMIT ?`, before, after, limit + 1,
       ).toArray();
       const hasMore = rows.length > limit;
       const messages = rows.slice(0, limit).reverse().map(msgOut);
@@ -255,6 +273,51 @@ export class ChatRoom extends DurableObject<Env> {
       if (!row) return json({ ok: false, error: { code: 'MESSAGE_NOT_FOUND', message: 'ไม่พบข้อความนี้ในห้อง' } }, 404);
       const m = msgOut(row);
       return json({ ok: true, data: { message: m, preview: previewOf(m) } });
+    }
+
+    // ---------- ยกเลิกส่ง / แอดมินลบข้อความ (worker ตรวจสมาชิก + บอกว่าเป็นแอดมินห้องไหม) ----------
+    // ผู้ส่งเอง: ภายใน 24 ชม. · แอดมินห้อง (กลุ่ม/ชาเนล): ทุกเวลา · ล้างเนื้อหาจริง เหลือแค่ร่องรอย → ส่งให้ทุกคนที่เปิดห้องอยู่
+    if (url.pathname === '/delete' && req.method === 'POST') {
+      let p: { seq?: unknown; userId?: unknown; canModerate?: unknown };
+      try {
+        p = await req.json();
+      } catch {
+        return json({ ok: false, error: { code: 'BAD_JSON', message: 'ข้อมูลที่ส่งมาไม่ใช่ JSON' } }, 400);
+      }
+      const seq = Number(p.seq);
+      if (!Number.isInteger(seq) || seq < 1 || typeof p.userId !== 'string') {
+        return json({ ok: false, error: { code: 'BAD_SEQ', message: 'ระบุข้อความที่จะลบไม่ถูกต้อง' } }, 400);
+      }
+      const row = this.sql.exec<MsgRow>(`SELECT * FROM messages WHERE seq = ?`, seq).toArray()[0];
+      if (!row) return json({ ok: false, error: { code: 'MESSAGE_NOT_FOUND', message: 'ไม่พบข้อความนี้ในห้อง' } }, 404);
+      if (row.deleted_at) return json({ ok: false, error: { code: 'ALREADY_DELETED', message: 'ข้อความนี้ถูกลบไปแล้ว' } }, 409);
+      const mine = row.sender_id === p.userId;
+      let by: 'sender' | 'admin';
+      if (mine && Date.now() - Date.parse(row.created_at) <= UNSEND_WINDOW_MS) {
+        by = 'sender';
+      } else if (p.canModerate === true) {
+        by = 'admin';
+      } else if (mine) {
+        return json({ ok: false, error: { code: 'UNSEND_EXPIRED', message: 'ยกเลิกส่งได้ภายใน 24 ชั่วโมงหลังส่งเท่านั้น' } }, 403);
+      } else {
+        return json({ ok: false, error: { code: 'NOT_YOURS', message: 'ลบได้เฉพาะข้อความของตัวเอง (หรือเป็นเจ้าของ/แอดมินห้อง)' } }, 403);
+      }
+      const at = nowThai();
+      try {
+        this.sql.exec(
+          `UPDATE messages SET deleted_at = ?, deleted_by = ?, body = '', extra = NULL,
+                  file_id = NULL, file_name = NULL, file_mime = NULL, file_size = NULL, file_width = NULL,
+                  file_height = NULL, file_duration_ms = NULL, file_expires_at = NULL
+           WHERE seq = ?`, at, by, seq,
+        );
+      } catch (err) {
+        console.error('ลบข้อความในห้องไม่สำเร็จ', err);
+        return json({ ok: false, error: { code: 'DELETE_FAILED', message: 'ลบข้อความไม่สำเร็จ (ที่เก็บข้อความขัดข้อง)' } }, 500);
+      }
+      const updated = msgOut(this.sql.exec<MsgRow>(`SELECT * FROM messages WHERE seq = ?`, seq).one());
+      this.broadcast({ type: 'message', message: updated }); // หน้าเว็บแทนที่ข้อความเดิมตาม seq
+      const last = this.sql.exec<{ s: number }>(`SELECT MAX(seq) AS s FROM messages`).one().s;
+      return json({ ok: true, data: { message: updated, by, fileId: row.file_id, wasLast: last === seq } });
     }
 
     // ---------- บอกทุกคนที่เปิดห้องอยู่ว่าข้อมูลห้องเปลี่ยน (เช่น ปักหมุด) ----------
@@ -331,7 +394,7 @@ export class ChatRoom extends DurableObject<Env> {
         this.send(ws, { type: 'pong' });
         return;
       case 'sync':
-        this.handleSync(ws, frame.afterSeq);
+        this.handleSync(ws, frame.afterSeq, info.clearedSeq ?? 0);
         return;
       case 'read':
         await this.handleRead(ws, info, frame.seq);
@@ -359,21 +422,23 @@ export class ChatRoom extends DurableObject<Env> {
     console.error('WebSocket ผิดพลาด', err);
   }
 
-  private handleSync(ws: WebSocket, afterSeq: number) {
+  private handleSync(ws: WebSocket, afterSeq: number, clearedSeq = 0) {
     if (!Number.isInteger(afterSeq) || afterSeq < 0) {
       this.send(ws, { type: 'error', code: 'BAD_SYNC', message: 'ค่าลำดับข้อความสำหรับดึงข้อมูลไม่ถูกต้อง' });
       return;
     }
     let rows: MsgRow[];
     if (afterSeq === 0) {
-      // เปิดห้องครั้งแรก → เอาข้อความล่าสุดชุดเดียว
-      rows = this.sql.exec<MsgRow>(`SELECT * FROM messages ORDER BY seq DESC LIMIT ?`, HISTORY_LIMIT).toArray().reverse();
-      const total = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM messages`).one().n;
+      // เปิดห้องครั้งแรก → เอาข้อความล่าสุดชุดเดียว (ไม่รวมข้อความที่คนนี้ล้างแชทไปแล้ว)
+      rows = this.sql.exec<MsgRow>(
+        `SELECT * FROM messages WHERE seq > ? ORDER BY seq DESC LIMIT ?`, clearedSeq, HISTORY_LIMIT,
+      ).toArray().reverse();
+      const total = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE seq > ?`, clearedSeq).one().n;
       this.send(ws, { type: 'sync', messages: rows.map(msgOut), hasMore: total > rows.length });
       return;
     }
     rows = this.sql.exec<MsgRow>(
-      `SELECT * FROM messages WHERE seq > ? ORDER BY seq ASC LIMIT ?`, afterSeq, SYNC_LIMIT + 1,
+      `SELECT * FROM messages WHERE seq > ? ORDER BY seq ASC LIMIT ?`, Math.max(afterSeq, clearedSeq), SYNC_LIMIT + 1,
     ).toArray();
     this.send(ws, { type: 'sync', messages: rows.slice(0, SYNC_LIMIT).map(msgOut), hasMore: rows.length > SYNC_LIMIT });
   }

@@ -64,6 +64,8 @@ export interface ChatMessage {
   file: FileInfo | null;
   extra: MessageExtra | null;
   createdAt: string;    // เวลาไทย ISO
+  /** ลบแล้ว (ยกเลิกส่งโดยผู้ส่ง / ลบโดยแอดมินห้อง) — body/file/extra ถูกล้าง เหลือแค่ร่องรอย */
+  deleted?: { at: string; by: 'sender' | 'admin' } | null;
 }
 
 // ---------- หน้าเว็บ → ห้อง ----------
