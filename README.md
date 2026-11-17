@@ -23,10 +23,16 @@
 5. **Queue** ชื่อ `chat-push` (Workers & Pages → Queues → Create) — ใช้กระจายแจ้งเตือน · API token ของ GitHub Actions ต้องมีสิทธิ์ **Queues: Edit**
 6. **LINE Login channel ต้องเป็น Published** (ไม่งั้นล็อกอินได้เฉพาะ Admin/Tester ของ channel)
 7. **โดเมน** `noti.kalon-ai.app` — โซน `kalon-ai.app` ต้องอยู่ใน Cloudflare account เดียวกัน (ตั้งใน `wrangler.jsonc` → routes)
+8. **เข้าสู่ระบบด้วย Google (ไม่บังคับ)** — ไม่ตั้ง = ปุ่ม Google แจ้งเหตุผล แต่ LINE ใช้ได้ปกติ (`/api/health` → `warnings`)
+   - Google Cloud Console → **Google Auth Platform** → Branding: ชื่อแอป + อีเมลติดต่อ
+   - Audience: เลือก **External** → กด **Publish app** ให้เป็น **In production** (ไม่งั้นเข้าได้เฉพาะ Test users)
+   - Clients → **Create client** → ชนิด **Web application** → Authorized redirect URI: `https://noti.kalon-ai.app/api/auth/google/callback`
+   - เอา Client ID / Client secret ไปใส่ Worker secrets: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+   - ใช้แค่ `openid email profile` (ข้อมูลพื้นฐาน) · ผูกบัญชี LINE ↔ Google ทำเองที่เมนู ☰ → บัญชี
 
 ## ใช้งานครั้งแรก
 
-1. เปิดเว็บ → เข้าสู่ระบบด้วย LINE → ขึ้น "รออนุมัติ"
+1. เปิดเว็บ → เข้าสู่ระบบด้วย LINE (หรือ Google) → ขึ้น "รออนุมัติ"
 2. ยังไม่มีแอดมิน → กรอก `SETUP_TOKEN` → เป็นแอดมินคนแรก
 3. คนอื่นล็อกอิน → แอดมินเข้า "แอดมิน" กดอนุมัติ
 
@@ -61,6 +67,7 @@
 - [x] เฟส 2: รูป (ย่อ 1600px) / ส่งเป็นไฟล์ / ข้อความเสียง 5 นาที — R2, เปิดได้เฉพาะสมาชิกห้อง, ลบอัตโนมัติ 180 วัน
 - [x] เฟส 3: ชาเนล (สาธารณะ/ส่วนตัว, แอดมินระบบสร้าง, เจ้าของ/แอดมินชาเนลโพสต์) + แจ้งเตือน Web Push ผ่าน Queue + ติดตั้งแอป
 - [x] ลิงก์เชิญเข้าชาเนล/กลุ่ม — คนใหม่ล็อกอิน LINE ผ่านลิงก์ได้รับอนุมัติทันที
+- [x] เข้าสู่ระบบด้วย Google + ผูกบัญชี LINE ↔ Google ในหน้าบัญชี
 - [x] เฟส 5: ธีมมืด/สว่าง, ตัวอักษร 5 ระดับ, สติกเกอร์, โน้ต (ในห้อง + ส่วนตัว), ระบบเพื่อน
 - [x] แจ้งเตือนแบบเทเลแกรม: ปิดเสียงตามเวลา (1 ชม./8 ชม./2 วัน/ตลอด), ส่งแบบเงียบ, @ชื่อ/ตอบกลับเด้งแม้ปิดเสียง, แบนเนอร์ในแอป, ตัวเลขบนไอคอน, ตั้งค่ารวม + ซ่อนเนื้อหา, รวมแจ้งเตือนต่อห้อง, บอทแจ้งเตือนตรง (`/api/bot/notify`), ปักหมุด
 - [x] เฟส 4: ระบบบอท (token + webhook ผ่าน Queue + Bot API) + n8n + บอท AI (Claude) + ข่าว RSS → ชาเนล + ฟอร์มรับออเดอร์ (ตัวสร้างฟอร์ม, การ์ดฟอร์ม, หน้าออเดอร์) — ดู `docs/n8n/README.md`

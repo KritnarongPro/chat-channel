@@ -29,6 +29,7 @@ import {
 } from './lib';
 import { FormField, OrderStatus, ORDER_STATUS_TH, checkFormDef, checkSubmission } from '../shared/forms';
 import { lineCallback, lineConfigError, lineStart } from './auth-line';
+import { googleCallback, googleConfigError, googleStart } from './auth-google';
 import { InviteRow, inviteProblem, loadInvite, redeemInvite } from './invites';
 
 export { ChatRoom } from './room';
@@ -54,6 +55,13 @@ const routes: Route[] = [
   // ---------- auth (LINE Login) ----------
   { method: 'GET',  pattern: '/api/auth/line/start',          need: 'public', handler: (c) => lineStart(c.env, c.url.searchParams.get('invite')) },
   { method: 'GET',  pattern: '/api/auth/line/callback',       need: 'public', handler: (c) => lineCallback(c.req, c.env) },
+  { method: 'GET',  pattern: '/api/auth/line/link',           need: 'any',    handler: (c) => lineStart(c.env, null, 'link') },
+  // ---------- เข้าสู่ระบบด้วย Google + ผูกบัญชี (ผู้ใช้เลือก: ผูกเองในหน้าบัญชี) ----------
+  { method: 'GET',  pattern: '/api/auth/google/start',        need: 'public', handler: (c) => googleStart(c.env, 'login', c.url.searchParams.get('invite')) },
+  { method: 'GET',  pattern: '/api/auth/google/link',         need: 'any',    handler: (c) => googleStart(c.env, 'link') },
+  { method: 'GET',  pattern: '/api/auth/google/callback',     need: 'public', handler: (c) => googleCallback(c.req, c.env) },
+  { method: 'GET',  pattern: '/api/me/identities',            need: 'any',    handler: getIdentities },
+  { method: 'POST', pattern: '/api/me/identities/google/unlink', need: 'any', handler: unlinkGoogle },
   { method: 'POST', pattern: '/api/auth/logout',              need: 'public', handler: logout },
   { method: 'GET',  pattern: '/api/me',                       need: 'any',    handler: me },
 
@@ -228,13 +236,17 @@ async function health(c: Ctx) {
   const lineErr = lineConfigError(c.env);
   if (lineErr) problems.push(lineErr);
   if (!c.env.SETUP_TOKEN) problems.push('NO_SETUP_TOKEN');
+  // ไม่บังคับ: ยังไม่ตั้ง Google → เข้าด้วย Google ไม่ได้ (ปุ่มจะแจ้งเหตุผล) แต่ระบบหลักใช้ได้
+  const warnings: string[] = [];
+  const googleErr = googleConfigError(c.env);
+  if (googleErr) warnings.push(googleErr);
   try {
     await c.env.DB.prepare('SELECT 1 FROM users LIMIT 1').first();
   } catch (err) {
     console.error('health: D1 ใช้ไม่ได้', err);
     problems.push('DB_NOT_READY');
   }
-  return ok({ time: nowThai(), problems });
+  return ok({ time: nowThai(), problems, warnings });
 }
 
 // ---------- auth ----------
@@ -279,6 +291,33 @@ async function claimAdmin(c: Ctx) {
 }
 
 // ---------- admin ----------
+// ---------- บัญชีที่ผูก (LINE / Google) ----------
+async function getIdentities(c: Ctx) {
+  const r = await db('อ่านบัญชีที่ผูก', () =>
+    c.env.DB.prepare(`SELECT line_user_id, google_sub, email FROM users WHERE id = ?`).bind(c.user!.id)
+      .first<{ line_user_id: string; google_sub: string | null; email: string | null }>(),
+  );
+  if (!r) throw new ApiError(404, 'USER_NOT_FOUND', 'ไม่พบบัญชีผู้ใช้');
+  return ok({
+    line: !r.line_user_id.startsWith('google:'),
+    google: r.google_sub ? { email: r.email } : null,
+    googleReady: googleConfigError(c.env) === null,
+  });
+}
+
+/** เลิกผูก Google — ทำได้เมื่อยังมี LINE ไว้เข้าสู่ระบบ (ไม่งั้นบัญชีจะเข้าไม่ได้อีก) */
+async function unlinkGoogle(c: Ctx) {
+  const r = await db('เลิกผูก Google', () =>
+    c.env.DB.prepare(
+      `UPDATE users SET google_sub = NULL, email = NULL, updated_at = ? WHERE id = ? AND google_sub IS NOT NULL AND line_user_id NOT LIKE 'google:%'`,
+    ).bind(nowThai(), c.user!.id).run(),
+  );
+  if (r.meta.changes !== 1) {
+    throw new ApiError(409, 'CANNOT_UNLINK', 'เลิกผูก Google ไม่ได้ — ต้องผูก LINE ไว้ก่อน (ไม่งั้นจะเข้าสู่ระบบไม่ได้อีก) หรือยังไม่ได้ผูก Google');
+  }
+  return ok({ unlinked: true });
+}
+
 async function adminListUsers(c: Ctx) {
   const status = c.url.searchParams.get('status');
   if (status && !['pending', 'active', 'blocked'].includes(status)) {
@@ -288,9 +327,16 @@ async function adminListUsers(c: Ctx) {
     (status
       ? c.env.DB.prepare(`SELECT * FROM users WHERE status = ? AND is_bot = 0 ORDER BY created_at DESC`).bind(status)
       : c.env.DB.prepare(`SELECT * FROM users WHERE is_bot = 0 ORDER BY status = 'pending' DESC, created_at DESC`)
-    ).all<Parameters<typeof userOut>[0] & { created_at: string }>(),
+    ).all<Parameters<typeof userOut>[0] & { created_at: string; line_user_id: string; google_sub: string | null; email: string | null }>(),
   );
-  return ok({ users: rows.results.map((r) => ({ ...userOut(r), createdAt: r.created_at })) });
+  return ok({
+    users: rows.results.map((r) => ({
+      ...userOut(r), createdAt: r.created_at,
+      // ให้แอดมินรู้ว่าสมัครมาทางไหน (อนุมัติถูกคน) · อีเมลแสดงเฉพาะหน้าแอดมิน
+      loginVia: [r.line_user_id.startsWith('google:') ? null : 'LINE', r.google_sub ? 'Google' : null].filter(Boolean),
+      email: r.email,
+    })),
+  });
 }
 
 async function adminSetStatus(c: Ctx) {

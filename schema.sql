@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0007_phase5.sql
+-- ล่าสุดถึง: 0008_google_login.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -14,9 +14,13 @@ CREATE TABLE users (
   status        TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'blocked')),
   role          TEXT NOT NULL DEFAULT 'member'  CHECK (role IN ('member', 'admin')),
   is_bot        INTEGER NOT NULL DEFAULT 0,  -- 0004: 1 = บอท (line_user_id = 'bot:<id>')
+  google_sub    TEXT,                        -- 0008: รหัสบัญชี Google (ผูกแล้ว) · สมัครด้วย Google อย่างเดียว → line_user_id = 'google:<sub>'
+  email         TEXT,                        -- 0008: อีเมลที่ Google ยืนยันแล้ว
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX idx_users_google_sub ON users(google_sub);  -- 0008
 
 -- ---------- การล็อกอิน (เก็บ hash ของ token เท่านั้น) ----------
 CREATE TABLE sessions (

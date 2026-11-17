@@ -10,7 +10,7 @@ import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
 
-type AdminUser = User & { createdAt: string };
+type AdminUser = User & { createdAt: string; loginVia: string[]; email: string | null };
 const STATUS_TH: Record<User['status'], string> = { pending: 'รออนุมัติ', active: 'ใช้งานได้', blocked: 'ถูกระงับ' };
 
 export default function AdminPage() {
@@ -63,6 +63,7 @@ export default function AdminPage() {
               <div className="small muted">
                 {STATUS_TH[u.status]} · สมัคร {thaiDate(u.createdAt)} {thaiClock(u.createdAt)}
               </div>
+              <div className="small muted">เข้าด้วย {u.loginVia.join(' + ') || '—'}{u.email ? ` · ${u.email}` : ''}</div>
             </div>
             {u.id !== me.user.id && (
               <div className="row-actions">

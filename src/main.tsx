@@ -31,6 +31,7 @@ import MyNotesPage from './pages/MyNotesPage';
 import RoomNotesPage from './pages/RoomNotesPage';
 import NotePage from './pages/NotePage';
 import AdminStickersPage from './pages/AdminStickersPage';
+import AccountPage from './pages/AccountPage';
 import { applyPrefs, cachedPrefs, Prefs } from './prefs';
 import { useNotify } from './notice';
 import './styles.css';
@@ -118,6 +119,7 @@ function App() {
           <Route path="form/:formId" element={<FormFillPage />} />
           <Route path="orders" element={<OrdersPage />} />
           <Route path="appearance" element={<AppearancePage />} />
+          <Route path="account" element={<AccountPage />} />
           <Route path="friends" element={<FriendsPage />} />
           <Route path="add/:userId" element={<AddFriendPage />} />
           <Route path="notes" element={<MyNotesPage />} />
