@@ -8,11 +8,12 @@
 //     ส่งใหม่ใช้รหัสเดิม เซิร์ฟเวอร์จึงไม่บันทึกซ้ำ
 //   - ไฟล์ (เฟส 2): กำลังอัป (%) → กำลังส่ง → ส่งแล้ว · อัปไม่สำเร็จ → "ส่งไม่สำเร็จ + เหตุผล" กดส่งใหม่ = อัปใหม่
 //   - แจ้งเตือน: ส่งแบบเงียบ / ตอบกลับ ผ่าน extra · room_update (เช่น ปักหมุด) → เรียก onRoomUpdate
+//   - ฟีเจอร์แชท (2026-11-17): reads/read = อ่านแล้ว · reactions = รีแอคชัน · loadUntil = โหลดย้อนจนเจอข้อความ (ค้นหา/กระโดด)
 // =====================================================================
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChatMessage, ClientFrame, FileKind, MessageExtra, ServerFrame } from '../shared/protocol';
-import { MAX_BYTES, MAX_MESSAGE_CHARS } from '../shared/protocol';
+import type { ChatMessage, ClientFrame, FileKind, MessageExtra, ReadState, ServerFrame } from '../shared/protocol';
+import { HISTORY_LIMIT, MAX_BYTES, MAX_MESSAGE_CHARS } from '../shared/protocol';
 import { api, errMsg, uploadFile } from './api';
 import { formatSize } from './media';
 
@@ -60,6 +61,8 @@ export function useRoomSocket(
   const [connError, setConnError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // อ่านแล้ว: userId → สถานะ (ชาเนลที่ไม่ใช่แอดมิน = ว่างเสมอ)
+  const [reads, setReads] = useState<Map<string, ReadState>>(new Map());
 
   const wsRef = useRef<WebSocket | null>(null);
   const lastSeqRef = useRef(0);
@@ -129,6 +132,7 @@ export function useRoomSocket(
     failsRef.current = 0;
     setMessages([]);
     setPending([]);
+    setReads(new Map());
     setConn('connecting');
     setConnError(null);
 
@@ -194,6 +198,19 @@ export function useRoomSocket(
           case 'warning': noticeRef.current('warning', f.message); break;
           case 'pong': break;
           case 'room_update': roomUpdateRef.current?.(); break;
+          case 'reads': setReads(new Map(f.reads.map((r) => [r.userId, r]))); break;
+          case 'read':
+            setReads((prev) => {
+              const cur = prev.get(f.userId);
+              if (!cur || cur.seq >= f.seq) return prev;   // คนที่ไม่รู้จัก (เพิ่งเข้า) → ได้ตอนเปิดห้องรอบหน้า
+              const next = new Map(prev);
+              next.set(f.userId, { ...cur, seq: f.seq });
+              return next;
+            });
+            break;
+          case 'reactions':
+            setMessages((prev) => prev.map((m) => (m.seq === f.seq ? { ...m, reactions: f.reactions } : m)));
+            break;
         }
       };
 
@@ -332,5 +349,49 @@ export function useRoomSocket(
     }
   }, [roomId, messages, hasMore, loadingOlder, merge]);
 
-  return { messages, pending, conn, connError, hasMore, loadingOlder, send, sendFile, sendForm, sendSticker, retry, discard, markRead, loadOlder };
+  // ---------- รีแอคชัน: emoji = null → เอาออก (ห้องตรวจสิทธิ์ ไม่ผ่านตอบ error มาแสดง) ----------
+  const react = useCallback((seq: number, emoji: string | null) => {
+    if (!rawSend({ type: 'react', seq, emoji })) {
+      noticeRef.current('error', 'กดรีแอคชันไม่ได้: ยังไม่ได้เชื่อมต่อกับห้อง (เน็ตหลุด?)');
+    }
+  }, [rawSend]);
+
+  // ---------- โหลดย้อนหลังจนถึงข้อความ seq (ใช้ตอนกดผลค้นหา / ข้อความที่ตอบกลับ / ปักหมุด) ----------
+  // คืน false = หาไม่เจอ (ถูกลบแชทฝั่งฉัน / ไกลเกิน 40 หน้า / โหลดไม่สำเร็จ — แจ้งเหตุผลแล้ว)
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const loadUntil = useCallback(async (seq: number): Promise<boolean> => {
+    let first = messagesRef.current[0]?.seq;
+    if (!first) return false;
+    let more = hasMore;
+    setLoadingOlder(true);
+    try {
+      for (let page = 0; first > seq; page++) {
+        if (!more) return false;
+        if (page >= 40) {
+          noticeRef.current('warning', `ข้อความนี้เก่ามาก (เกิน ${40 * HISTORY_LIMIT} ข้อความ) — เลื่อนขึ้นเพื่อโหลดต่อเอง`);
+          return false;
+        }
+        const data = await api.get<{ messages: ChatMessage[]; hasMore: boolean }>(
+          `/api/rooms/${encodeURIComponent(roomId)}/messages?before=${first}`,
+        );
+        merge(data.messages);
+        setHasMore(data.hasMore);
+        more = data.hasMore;
+        if (data.messages.length === 0) return false;
+        first = data.messages[0].seq;
+      }
+      return true;
+    } catch (e) {
+      noticeRef.current('error', `โหลดข้อความเก่าไม่สำเร็จ: ${errMsg(e)}`);
+      return false;
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [roomId, hasMore, merge]);
+
+  return {
+    messages, pending, conn, connError, hasMore, loadingOlder, reads,
+    send, sendFile, sendForm, sendSticker, retry, discard, markRead, loadOlder, react, loadUntil,
+  };
 }

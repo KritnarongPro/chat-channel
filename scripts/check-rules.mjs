@@ -178,6 +178,15 @@ for (const f of walk('worker', ['.ts'])) {
   }
 }
 
+// ---------- CORE-07 SQL (D1 / Durable Object): ห้ามใช้ LIKE กับคำที่ผู้ใช้พิมพ์ ----------
+// Cloudflare จำกัดรูปแบบ LIKE/GLOB ไว้ 50 ไบต์ — ไทย 1 ตัว = 3 ไบต์ → คำค้น ~16 ตัวก็ error "pattern too complex" (เจอ 2026-11-17 ตอนทำค้นหาในห้อง)
+// ใช้ instr(lower(col), ?) > 0 แทน (ไม่มีเพดาน ไม่ต้อง escape % _)
+for (const f of walk('worker', ['.ts'])) {
+  read(f).split('\n').forEach((line, i) => {
+    if (/\b(LIKE|GLOB)\s+\?/i.test(line)) fail('CORE-07', `${f}:${i + 1} ใช้ LIKE/GLOB กับค่าที่ bind เข้ามา — เปลี่ยนเป็น instr(lower(คอลัมน์), ?) > 0`);
+  });
+}
+
 // ---------- BUGS-13 เพื่อน: ตรวจ "แชท 1:1 ได้เฉพาะเพื่อน" ทั้งตอนเปิดห้องและตอนส่งทุกข้อความ ----------
 {
   const idx = read(join('worker', 'index.ts'));
@@ -226,10 +235,24 @@ for (const f of walk('worker', ['.ts'])) {
   if (!/UNSEND_WINDOW_MS/.test(del)) fail('BUGS-16', 'room.ts /delete ต้องตรวจ UNSEND_WINDOW_MS (ยกเลิกส่งได้ภายใน 24 ชม.)');
 }
 
+// ---------- BUGS-17 ฟีเจอร์แชท: ค้นหาต้องไม่เจอข้อความที่ลบแชทฝั่งฉัน + ชาเนลห้ามส่ง "อ่านแล้ว" ให้ผู้ติดตาม (กันไว้ก่อน 2026-11-17) ----------
+{
+  const idx = read(join('worker', 'index.ts'));
+  const srch = idx.slice(idx.indexOf('async function searchMessages'), idx.indexOf('async function searchMessages') + 700);
+  if (!/after=\$\{after\}/.test(srch)) fail('BUGS-17', 'searchMessages ต้องส่ง after=<cleared_seq> ให้ห้องแชท (ไม่งั้นค้นเจอข้อความที่ลบแชทฝั่งฉันไปแล้ว)');
+  const sock = idx.slice(idx.indexOf('async function openSocket'), idx.indexOf('async function openSocket') + 900);
+  if (!/X-Room-Role/.test(sock) || !/X-Room-Type/.test(sock)) fail('BUGS-17', 'openSocket ต้องส่ง X-Room-Role + X-Room-Type ให้ห้องแชท (ใช้กันไม่ให้ผู้ติดตามชาเนลเห็นว่าใครอ่านแล้ว)');
+  const br = room.slice(room.indexOf('private broadcastRead'), room.indexOf('private broadcastRead') + 400);
+  if (!/canSeeReads\(/.test(br)) fail('BUGS-17', 'broadcastRead ใน room.ts ต้องกรองด้วย canSeeReads() (ชาเนล: เฉพาะเจ้าของ/แอดมิน)');
+  if (!/if \(canSeeReads\(info\)\) await this\.sendReads/.test(room)) fail('BUGS-17', "sendReads ต้องเรียกเฉพาะเมื่อ canSeeReads(info)");
+  const post = room.slice(room.indexOf("case 'send':"), room.indexOf("case 'send':") + 300);
+  if (/forwardedFrom|frame\.forwarded/.test(post)) fail('BUGS-17', 'WebSocket send ห้ามส่ง forwardedFrom เข้า handleSend (ป้าย "ส่งต่อจาก" มาจาก worker เท่านั้น)');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..06, BUGS-01..16)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..07, BUGS-01..17)');
