@@ -114,6 +114,7 @@ export type ClientFrame =
   | { type: 'typing' }                                   // กำลังพิมพ์ (หน้าเว็บส่งไม่เกินทุก 3 วิ)
   | { type: 'vote'; seq: number; options: number[] }    // โหวต: แทนที่คำตอบเดิมทั้งหมด ([] = ถอนโหวต)
   | { type: 'poll_close'; seq: number }                 // ปิดโหวตก่อนเวลา (คนสร้าง / เจ้าของ-แอดมินห้อง)
+  | { type: 'hide'; seq: number }                       // ลบข้อความเฉพาะฝั่งฉัน (คนอื่นยังเห็น)
   | { type: 'ping' };
 
 // ---------- ห้อง → หน้าเว็บ ----------
@@ -130,4 +131,5 @@ export type ServerFrame =
   | { type: 'reactions'; seq: number; reactions: ReactionGroup[] }
   | { type: 'typing'; userId: string; name: string }
   | { type: 'poll'; seq: number; poll: PollState }
+  | { type: 'hidden'; seq: number }                     // ลบเฉพาะฝั่งฉันแล้ว → ส่งให้ทุกเครื่องของคนนี้
   | ActivityFrame;

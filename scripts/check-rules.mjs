@@ -267,10 +267,21 @@ for (const f of walk('worker', ['.ts'])) {
   if (!/COUNT\(\*\) FROM room_pins WHERE room_id = \?1\) < \?7/.test(pin)) fail('BUGS-18', 'pinMessage ต้องนับ + เพิ่มหมุดในคำสั่งเดียว (กันกดพร้อมกันแล้วเกิน 5)');
 }
 
+// ---------- BUGS-19 ลบเฉพาะฝั่งฉัน: ข้อความที่ซ่อนต้องไม่กลับมาทาง history / search / sync (กันไว้ก่อน 2026-11-17) ----------
+{
+  const idx = read(join('worker', 'index.ts'));
+  const hist = idx.slice(idx.indexOf('async function history'), idx.indexOf('async function history') + 900);
+  const srch = idx.slice(idx.indexOf('async function searchMessages'), idx.indexOf('async function searchMessages') + 900);
+  if (!/'X-User-Id': c\.user!\.id/.test(hist)) fail('BUGS-19', "history ต้องส่ง 'X-User-Id' ให้ห้องแชท (ไม่งั้นเลื่อนขึ้นแล้วข้อความที่ลบฝั่งฉันกลับมา)");
+  if (!/'X-User-Id': c\.user!\.id/.test(srch)) fail('BUGS-19', "searchMessages ต้องส่ง 'X-User-Id' ให้ห้องแชท (ไม่งั้นค้นเจอข้อความที่ลบฝั่งฉัน)");
+  const sync = room.slice(room.indexOf('private handleSync'), room.indexOf('private handleSync') + 1400);
+  if ((sync.match(/NOT_HIDDEN/g) ?? []).length < 3) fail('BUGS-19', 'handleSync ต้องกรอง NOT_HIDDEN ทั้งตอนเปิดห้อง (2 คำสั่ง) และตอนต่อใหม่');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..07, BUGS-01..18)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..07, BUGS-01..19)');

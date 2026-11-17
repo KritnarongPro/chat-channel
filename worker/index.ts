@@ -949,7 +949,7 @@ async function history(c: Ctx) {
   const stub = roomStub(c.env, c.params.id);
   const after = room.cleared_seq ?? 0; // ล้างแชทฝั่งฉันแล้ว → ไม่ส่งข้อความก่อนจุดนั้น
   return stub.fetch(new Request(`https://room/history?before=${encodeURIComponent(before)}&limit=${encodeURIComponent(limit)}&after=${after}`, {
-    headers: { 'X-Room-Id': c.params.id },
+    headers: { 'X-Room-Id': c.params.id, 'X-User-Id': c.user!.id },  // X-User-Id: กรองข้อความที่ลบเฉพาะฝั่งฉัน
   }));
 }
 
@@ -981,7 +981,7 @@ async function searchMessages(c: Ctx) {
   if (q.length < 1 || q.length > 100) throw new ApiError(400, 'BAD_QUERY', 'คำค้นต้องยาว 1–100 ตัวอักษร');
   const after = room.cleared_seq ?? 0;
   return roomStub(c.env, c.params.id).fetch(new Request(`https://room/search?q=${encodeURIComponent(q)}&after=${after}`, {
-    headers: { 'X-Room-Id': c.params.id },
+    headers: { 'X-Room-Id': c.params.id, 'X-User-Id': c.user!.id },  // X-User-Id: ไม่ค้นข้อความที่ลบเฉพาะฝั่งฉัน
   }));
 }
 
