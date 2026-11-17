@@ -4,6 +4,7 @@
 
 import { useEffect, useState } from 'react';
 import { StickerPack, api, errMsg, stickerUrl } from './api';
+import Loading from './Loading';
 
 export default function StickerPicker({ onPick }: { onPick: (stickerId: string) => void }) {
   const [packs, setPacks] = useState<StickerPack[] | null>(null);
@@ -17,7 +18,7 @@ export default function StickerPicker({ onPick }: { onPick: (stickerId: string) 
   }, []);
 
   if (error) return <div className="sticker-picker"><p className="small error-text" style={{ padding: 8 }}>{error}</p></div>;
-  if (!packs) return <div className="sticker-picker"><p className="small muted" style={{ padding: 8 }}>กำลังโหลดสติกเกอร์…</p></div>;
+  if (!packs) return <div className="sticker-picker"><Loading variant="inline" /></div>;
   if (packs.length === 0) return <div className="sticker-picker"><p className="small muted" style={{ padding: 8 }}>ยังไม่มีสติกเกอร์ — แอดมินเพิ่มได้ที่ แอดมิน → สติกเกอร์</p></div>;
   const pack = packs[Math.min(tab, packs.length - 1)];
   return (

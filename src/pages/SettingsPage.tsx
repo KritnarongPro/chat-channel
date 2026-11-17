@@ -10,6 +10,7 @@ import { TopBar } from '../components';
 import { useNotify } from '../notice';
 import { PushState, currentEndpoint, disablePush, enablePush, getPushState } from '../pwa';
 import SetupCard from '../SetupCard';
+import Loading from '../Loading';
 
 interface Device {
   id: string; endpoint: string; label: string | null; createdAt: string; lastSuccessAt: string | null;
@@ -155,7 +156,7 @@ function NotifySettingsBlock() {
     <>
       <h3 className="section-title">แจ้งเตือนอะไรบ้าง (ทุกเครื่องของคุณ)</h3>
       {error && <div className="banner banner-error" role="alert">{error}</div>}
-      {!v && !error && <p className="center muted">กำลังโหลด…</p>}
+      {!v && !error && <Loading variant="card" />}
       {v && (
         <ul className="user-list">
           {SETTING_ROWS.map((r) => (

@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { User, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
+import Loading from '../Loading';
 
 export default function NewChatPage() {
   const nav = useNavigate();
@@ -65,7 +66,7 @@ export default function NewChatPage() {
         />
       </div>
       {loadError && <div className="banner banner-error" role="alert">{loadError}</div>}
-      {users === null && !loadError && <p className="center muted">กำลังโหลด…</p>}
+      {users === null && !loadError && <Loading variant="list" />}
       {users?.length === 0 && <p className="center muted">ยังไม่มีเพื่อน — <Link to="/friends">เพิ่มเพื่อน</Link> ก่อนเริ่มแชท</p>}
       {(users?.length ?? 0) > 0 && <p className="small muted" style={{ padding: '0 14px' }}>แสดงเฉพาะเพื่อน แอดมิน และบอท · ไม่เจอชื่อ? <Link to="/friends">เพิ่มเพื่อน</Link></p>}
       <ul className="user-list">

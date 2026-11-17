@@ -12,6 +12,7 @@ import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import SetupCard from '../SetupCard';
 import { setBadge } from '../InAppNotifier';
+import Loading from '../Loading';
 
 const REFRESH_MS = 15_000;
 
@@ -73,7 +74,7 @@ export default function ChatListPage() {
           {error} <button className="link" onClick={() => void load()}>ลองใหม่</button>
         </div>
       )}
-      {rooms === null && !error && <p className="center muted">กำลังโหลด…</p>}
+      {rooms === null && !error && <Loading variant="list" onRetry={() => void load()} />}
       {rooms?.length === 0 && <p className="center muted">ยังไม่มีแชท — กดปุ่ม + เพื่อเริ่มคุย</p>}
       <ul className="room-list">
         {rooms?.map((r) => (

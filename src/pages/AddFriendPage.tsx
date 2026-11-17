@@ -8,6 +8,7 @@ import { User, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
+import Loading from '../Loading';
 
 export default function AddFriendPage() {
   const { userId = '' } = useParams();
@@ -41,7 +42,7 @@ export default function AddFriendPage() {
       <TopBar title="เพิ่มเพื่อน" back="/friends" />
       <div className="center">
         {error && <p className="error-text">{error}</p>}
-        {user === undefined && !error && <p className="muted">กำลังโหลด…</p>}
+        {user === undefined && !error && <Loading variant="card" />}
         {userId === me.user.id && <p>นี่คือลิงก์เพิ่มเพื่อนของคุณเอง — ส่งให้คนอื่นสแกน</p>}
         {user === null && userId !== me.user.id && <p className="error-text">ไม่พบผู้ใช้นี้ หรือยังไม่ได้รับอนุมัติ</p>}
         {user && (

@@ -62,6 +62,7 @@ export function useRoomSocket(
   const [connError, setConnError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const [synced, setSynced] = useState(false);  // ได้ข้อความชุดแรกแล้ว (ก่อนหน้านั้นหน้าเว็บโชว์โครงร่างโหลด)
   // อ่านแล้ว: userId → สถานะ (ชาเนลที่ไม่ใช่แอดมิน = ว่างเสมอ)
   const [reads, setReads] = useState<Map<string, ReadState>>(new Map());
   // กำลังพิมพ์: userId → { ชื่อ, หมดเวลาเมื่อ }
@@ -137,6 +138,7 @@ export function useRoomSocket(
     setMessages([]);
     setPending([]);
     setReads(new Map());
+    setSynced(false);
     setConn('connecting');
     setConnError(null);
 
@@ -191,6 +193,7 @@ export function useRoomSocket(
             if (initialSyncRef.current) {
               // เปิดห้องครั้งแรก: hasMore = ยังมีข้อความเก่ากว่านี้ให้เลื่อนขึ้นดู
               initialSyncRef.current = false;
+              setSynced(true);
               setHasMore(f.hasMore);
               merge(f.messages);
             } else {
@@ -443,7 +446,7 @@ export function useRoomSocket(
   }, [rawSend]);
 
   return {
-    messages, pending, conn, connError, hasMore, loadingOlder, reads, typing,
+    messages, pending, conn, connError, hasMore, loadingOlder, reads, typing, synced,
     send, sendFile, sendForm, sendSticker, retry, discard, markRead, loadOlder, react, loadUntil,
     sendTyping, sendPoll, vote, closePoll,
   };

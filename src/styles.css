@@ -297,3 +297,21 @@ button.read-mark { padding: 0; border: 0; background: none; cursor: pointer; tex
 .pin-item > button:first-child { flex: 1; min-width: 0; border-bottom: 0; }
 .search-results .pin-item > .link { width: auto; flex: none; white-space: nowrap; border-bottom: 0; padding: 8px; }
 .row-check input { width: auto; flex: none; }
+
+/* ---------- หน้าโหลดแบบโครงร่างเทากะพริบ (2026-11-17) — src/Loading.tsx ---------- */
+.skel-box { background: linear-gradient(90deg, var(--border) 25%, var(--bg) 50%, var(--border) 75%); background-size: 200% 100%; animation: skel-shine 1.3s ease-in-out infinite; border-radius: 6px; }
+@keyframes skel-shine { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .skel-box { animation: none; } }
+.skel-row { display: flex; gap: 12px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.skel-avatar { width: 44px; height: 44px; border-radius: 50%; flex: none; }
+.skel-text { flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.skel-line { height: 13px; }
+.skel-sub { height: 11px; opacity: .7; }
+.skel-bubbles { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+.skel-bubble-row { display: flex; }
+.skel-bubble-row.mine { justify-content: flex-end; }
+.skel-bubble { border-radius: 14px; max-width: 78%; }
+.skel-card { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; }
+.skel-field { height: 38px; border-radius: 8px; }
+.slow-notice { margin: 8px 12px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

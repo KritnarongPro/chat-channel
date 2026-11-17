@@ -24,6 +24,7 @@ import { useMe } from '../me';
 import { useNotify } from '../notice';
 import { OutgoingFile, useRoomSocket } from '../useRoomSocket';
 import MessageContent from '../MessageContent';
+import Loading from '../Loading';
 import VoiceRecorder from '../VoiceRecorder';
 import InvitePanel from '../InvitePanel';
 import { formatDuration, formatSize, prepareImage, prepareVideo } from '../media';
@@ -328,6 +329,7 @@ export default function ChatRoomPage() {
       )}
 
       <div className="messages" ref={listRef} onScroll={onScroll}>
+        {!s.synced && s.conn !== 'failed' && <Loading variant="bubbles" />}
         {s.loadingOlder && <p className="center muted small">กำลังโหลดข้อความเก่า…</p>}
         {groupAlbums(s.messages).map((item) => {
           if (item.album) {
@@ -940,7 +942,7 @@ function MembersPanel({ room, members, onClose, onChanged }: {
           </>
         ) : (
           <>
-            {users === null && !error && <p className="muted">กำลังโหลด…</p>}
+            {users === null && !error && <Loading variant="list" rows={4} />}
             {users?.length === 0 && <p className="muted">ทุกคนอยู่ในกลุ่มแล้ว</p>}
             <ul className="user-list">
               {users?.map((u) => (
@@ -1121,7 +1123,7 @@ function ForwardSheet({ m, roomId, onClose }: { m: ChatMessage; roomId: string; 
             <p className="small muted">คนรับจะเห็น "ส่งต่อจาก {m.extra?.forwardedFrom ?? m.senderName}" · เลือกได้ไม่เกิน {FORWARD_MAX} ห้อง</p>
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อแชท" />
             {loadError && <p className="error-text small">{loadError}</p>}
-            {!rooms && !loadError && <p className="small muted">กำลังโหลด…</p>}
+            {!rooms && !loadError && <Loading variant="list" rows={4} />}
             <ul className="user-list">
               {shown.map((r) => (
                 <li key={r.id} className="user-item">

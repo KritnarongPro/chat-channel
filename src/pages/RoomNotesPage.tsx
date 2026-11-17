@@ -9,6 +9,7 @@ import { Room, RoomNote, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 import { useNotify } from '../notice';
 import { thaiClock, thaiDate } from '../../shared/time';
+import Loading from '../Loading';
 
 export default function RoomNotesPage() {
   const { id = '' } = useParams();
@@ -70,7 +71,7 @@ export default function RoomNotesPage() {
           </div>
         </div>
       )}
-      {notes === null && !error && <p className="center muted">กำลังโหลด…</p>}
+      {notes === null && !error && <Loading variant="list" />}
       {notes?.length === 0 && !writing && <p className="center muted">ยังไม่มีโน้ตในห้องนี้</p>}
       {notes?.map((n) => (
         <Link key={n.id} to={`/note/${encodeURIComponent(n.id)}`} className="note-card">

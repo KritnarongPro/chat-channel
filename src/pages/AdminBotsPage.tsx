@@ -7,6 +7,7 @@ import { thaiClock, thaiDate } from '../../shared/time';
 import { Bot, api, errMsg } from '../api';
 import { TopBar } from '../components';
 import { useNotify } from '../notice';
+import Loading from '../Loading';
 
 const when = (iso: string | null) => (iso ? `${thaiDate(iso)} ${thaiClock(iso)}` : '-');
 
@@ -85,7 +86,7 @@ export default function AdminBotsPage() {
       )}
 
       {error && <div className="banner banner-error" role="alert">{error}</div>}
-      {bots === null && !error && <p className="center muted">กำลังโหลด…</p>}
+      {bots === null && !error && <Loading variant="list" />}
       {bots?.length === 0 && <p className="center muted">ยังไม่มีบอท</p>}
       <ul className="user-list">
         {bots?.map((b) => (

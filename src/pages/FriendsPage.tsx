@@ -12,6 +12,7 @@ import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
 import { thaiDate } from '../../shared/time';
+import Loading from '../Loading';
 
 type Tab = 'friends' | 'requests' | 'add';
 
@@ -96,7 +97,7 @@ export default function FriendsPage() {
         <button className={`chip ${tab === 'add' ? 'on' : ''}`} onClick={() => setTab('add')}>+ เพิ่มเพื่อน</button>
       </div>
       {error && <div className="banner banner-error" role="alert">{error} <button className="link" onClick={() => void load()}>ลองใหม่</button></div>}
-      {!data && !error && <p className="center muted">กำลังโหลด…</p>}
+      {!data && !error && <Loading variant="list" />}
 
       {data && tab === 'friends' && (
         <>
