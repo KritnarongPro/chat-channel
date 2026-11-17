@@ -215,10 +215,21 @@ for (const f of walk('worker', ['.ts'])) {
   if (!/me\.needsGoogle\s*\?/.test(read(join('src', 'main.tsx')))) fail('BUGS-15', 'src/main.tsx ต้องเช็ก me.needsGoogle ก่อนเข้าแอป (หน้าบังคับผูก Gmail)');
 }
 
+// ---------- BUGS-16 ลบแชท: ข้อความที่ล้างฝั่งฉันต้องไม่กลับมา + ยกเลิกส่งต้องตรวจ 24 ชม. ที่ห้อง (กันไว้ก่อน 2026-11-17) ----------
+{
+  const idx = read(join('worker', 'index.ts'));
+  const sock = idx.slice(idx.indexOf('async function openSocket'), idx.indexOf('async function openSocket') + 900);
+  const hist = idx.slice(idx.indexOf('async function history'), idx.indexOf('async function history') + 900);
+  if (!/X-Cleared-Seq/.test(sock)) fail('BUGS-16', 'openSocket ต้องส่ง X-Cleared-Seq ให้ห้องแชท (ไม่งั้นข้อความที่ลบแชทแล้วกลับมาตอนเปิดห้อง)');
+  if (!/after=\$\{after\}/.test(hist)) fail('BUGS-16', 'history ต้องส่ง after=<cleared_seq> ให้ห้องแชท (ไม่งั้นเลื่อนขึ้นแล้วเจอข้อความที่ลบแชทไปแล้ว)');
+  const del = room.slice(room.indexOf("url.pathname === '/delete'"), room.indexOf("url.pathname === '/broadcast'"));
+  if (!/UNSEND_WINDOW_MS/.test(del)) fail('BUGS-16', 'room.ts /delete ต้องตรวจ UNSEND_WINDOW_MS (ยกเลิกส่งได้ภายใน 24 ชม.)');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..06, BUGS-01..15)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..06, BUGS-01..16)');

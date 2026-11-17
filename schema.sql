@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0008_google_login.sql
+-- ล่าสุดถึง: 0009_delete_chat.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -66,6 +66,7 @@ CREATE TABLE room_members (
   last_read_seq  INTEGER NOT NULL DEFAULT 0,
   muted          INTEGER NOT NULL DEFAULT 0,  -- 0003: 1 = ปิดแจ้งเตือนห้องนี้
   muted_until    TEXT,                        -- 0006: ปิดถึงเวลานี้ (NULL + muted=1 = ปิดตลอด)
+  cleared_seq    INTEGER NOT NULL DEFAULT 0,  -- 0009: ล้างแชทฝั่งฉันถึงลำดับนี้ (0 = ไม่เคยล้าง)
   PRIMARY KEY (room_id, user_id)
 );
 CREATE INDEX idx_room_members_user ON room_members(user_id);

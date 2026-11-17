@@ -123,7 +123,7 @@ export interface Room {
   canPost: boolean;                            // ชาเนล: เฉพาะเจ้าของ/แอดมินชาเนล
 }
 
-export interface RoomMember { id: string; displayName: string; pictureUrl: string | null; role: string }
+export interface RoomMember { id: string; displayName: string; pictureUrl: string | null; role: string; isBot?: boolean }  // isBot: ใช้เลือกผู้รับเจ้าของกลุ่ม (บอทรับไม่ได้)
 
 export type { ChatMessage };
 

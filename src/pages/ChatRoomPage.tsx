@@ -5,6 +5,7 @@
 // เฟส 3: ชาเนล (โพสต์ได้เฉพาะเจ้าของ/แอดมินชาเนล) · ปุ่ม 🔔/🔕 ปิดแจ้งเตือนรายห้อง
 // แจ้งเตือน: ปิดเสียงตามเวลา · ปักหมุด · ตอบกลับ · @ชื่อ · ส่งแบบเงียบ
 // เฟส 5: สติกเกอร์ (แผงเลือกในช่องพิมพ์) · ปุ่ม 📝 โน้ตของห้อง
+// ลบแชท: ยกเลิกส่ง (24 ชม.) / แอดมินลบ ในเมนู ⋯ ของข้อความ · ปุ่ม ⋯ บนหัวห้อง: ลบแชทฝั่งฉัน / ออกจากกลุ่ม
 // =====================================================================
 
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -47,6 +48,7 @@ export default function ChatRoomPage() {
   const [menuFor, setMenuFor] = useState<ChatMessage | null>(null);
   const [showMute, setShowMute] = useState(false);
   const [showStickers, setShowStickers] = useState(false);
+  const [showRoomMenu, setShowRoomMenu] = useState(false);
 
   const loadRoom = useCallback(async () => {
     try {
@@ -198,6 +200,21 @@ export default function ChatRoomPage() {
       notify('error', `${seq === null ? 'เลิกปักหมุด' : 'ปักหมุด'}ไม่สำเร็จ: ${errMsg(e)}`);
     }
   }
+  // ---------- ลบข้อความ: ยกเลิกส่ง (ของตัวเอง 24 ชม.) / แอดมินห้องลบ ----------
+  async function deleteMsg(m: ChatMessage, asAdmin: boolean) {
+    const q = asAdmin && m.senderId !== me.user.id
+      ? `ลบข้อความของ ${m.senderName}? ทุกคนจะเห็นว่า "ข้อความถูกลบโดยแอดมิน"`
+      : 'ยกเลิกส่งข้อความนี้? ทุกคนในห้องจะเห็นว่า "ข้อความถูกยกเลิก" (แจ้งเตือนที่เด้งไปแล้วดึงกลับไม่ได้)';
+    if (!confirm(q)) return;
+    try {
+      const r = await api.post<{ by: string; warnings: string[] }>(`/api/rooms/${encodeURIComponent(id)}/messages/${m.seq}/delete`);
+      notify('success', r.by === 'admin' ? 'ลบข้อความแล้ว' : 'ยกเลิกส่งแล้ว');
+      for (const w of r.warnings) notify('warning', w);
+    } catch (e) {
+      notify('error', `ลบไม่สำเร็จ: ${errMsg(e)}`);
+    }
+  }
+
   function jumpTo(seq: number) {
     const el = document.getElementById(`msg-${seq}`);
     if (!el) { notify('warning', 'ข้อความนี้อยู่ไกลเกินไป — เลื่อนขึ้นเพื่อโหลดข้อความเก่าก่อน'); return; }
@@ -226,6 +243,7 @@ export default function ChatRoomPage() {
         right={room && (
           <>
             <Link to={`/room/${encodeURIComponent(id)}/notes`} className="btn btn-small btn-ghost" aria-label="โน้ตของห้องนี้">📝</Link>
+            <button className="btn btn-small btn-ghost" onClick={() => setShowRoomMenu(true)} aria-label="เมนูห้อง">⋯</button>
             <button className="btn btn-small btn-ghost" onClick={() => setShowMute(true)} aria-label="ตั้งค่าแจ้งเตือนห้องนี้">
               {room.muted ? '🔕' : '🔔'}
             </button>
@@ -256,17 +274,20 @@ export default function ChatRoomPage() {
               <div className={`bubble-row ${mine ? 'mine' : ''}`} id={`msg-${m.seq}`}>
                 <div className={`bubble ${m.kind === 'sticker' ? 'bubble-sticker' : ''}`}>
                   {!mine && isGroup && <div className="bubble-name">{m.senderName}</div>}
-                  {m.extra?.replyTo && (
+                  {m.deleted ? (
+                    <div className="bubble-deleted">{m.deleted.by === 'admin' ? '🚫 ข้อความถูกลบโดยแอดมิน' : '🚫 ข้อความถูกยกเลิก'}</div>
+                  ) : null}
+                  {!m.deleted && m.extra?.replyTo && (
                     <button className="reply-quote" onClick={() => jumpTo(m.extra!.replyTo!.seq)}>
                       <b>{m.extra.replyTo.senderName ?? 'ข้อความ'}</b>
                       <span>{m.extra.replyTo.snippet ?? ''}</span>
                     </button>
                   )}
-                  <MessageContent m={m} roomId={id} />
+                  {!m.deleted && <MessageContent m={m} roomId={id} />}
                   <div className="bubble-meta">
                     {m.extra?.silent && <span title="ส่งแบบเงียบ">🔕 </span>}
                     {thaiClock(m.createdAt)}
-                    <button className="bubble-more" onClick={() => setMenuFor(m)} aria-label="ตัวเลือกข้อความ">⋯</button>
+                    {!m.deleted && <button className="bubble-more" onClick={() => setMenuFor(m)} aria-label="ตัวเลือกข้อความ">⋯</button>}
                   </div>
                 </div>
               </div>
@@ -395,6 +416,9 @@ export default function ChatRoomPage() {
           canReply={!!room?.canPost}
           canPin={canPin}
           isPinned={room?.pinned?.seq === menuFor.seq}
+          canUnsend={menuFor.senderId === me.user.id && Date.now() - Date.parse(menuFor.createdAt) <= UNSEND_MS}
+          canModerate={!!room && room.type !== 'dm' && (room.myRole === 'owner' || room.myRole === 'admin')}
+          onDelete={(asAdmin) => { const m = menuFor; setMenuFor(null); void deleteMsg(m, asAdmin); }}
           onClose={() => setMenuFor(null)}
           onReply={() => {
             setReplyTo({ seq: menuFor.seq, senderName: menuFor.senderName, snippet: previewText(menuFor) });
@@ -408,6 +432,10 @@ export default function ChatRoomPage() {
             catch { notify('error', 'คัดลอกไม่สำเร็จ — เบราว์เซอร์ไม่อนุญาตให้เข้าถึงคลิปบอร์ด'); }
           }}
         />
+      )}
+
+      {showRoomMenu && room && (
+        <RoomMenu room={room} members={members} onClose={() => setShowRoomMenu(false)} />
       )}
 
       {showMute && room && (
@@ -439,8 +467,11 @@ function previewText(m: ChatMessage): string {
   return '';
 }
 
-function MessageMenu({ m, canReply, canPin, isPinned, onClose, onReply, onPin, onUnpin, onCopy }: {
-  m: ChatMessage; canReply: boolean; canPin: boolean; isPinned: boolean; onClose: () => void;
+const UNSEND_MS = 24 * 3600_000; // ต้องตรงกับ UNSEND_WINDOW_MS ใน worker/room.ts (เซิร์ฟเวอร์ตรวจซ้ำเสมอ)
+
+function MessageMenu({ m, canReply, canPin, isPinned, canUnsend, canModerate, onDelete, onClose, onReply, onPin, onUnpin, onCopy }: {
+  m: ChatMessage; canReply: boolean; canPin: boolean; isPinned: boolean; canUnsend: boolean; canModerate: boolean;
+  onDelete: (asAdmin: boolean) => void; onClose: () => void;
   onReply: () => void; onPin: (notifyAll: boolean) => void; onUnpin: () => void; onCopy: () => void;
 }) {
   return (
@@ -456,6 +487,10 @@ function MessageMenu({ m, canReply, canPin, isPinned, onClose, onReply, onPin, o
           </>
         )}
         {canPin && isPinned && <button className="btn btn-ghost btn-block" onClick={onUnpin}>เลิกปักหมุด</button>}
+        {canUnsend && <button className="btn btn-ghost btn-block danger-text" onClick={() => onDelete(false)}>↩︎ ยกเลิกส่ง (ทุกคนจะไม่เห็น)</button>}
+        {!canUnsend && canModerate && (
+          <button className="btn btn-ghost btn-block danger-text" onClick={() => onDelete(true)}>🗑 ลบข้อความนี้ (แอดมิน)</button>
+        )}
       </div>
     </div>
   );
@@ -498,6 +533,82 @@ function MuteSheet({ room, onClose, onSaved }: {
           <button key={o.key} className="btn btn-ghost btn-block" disabled={busy} onClick={() => void save({ muted: true, for: o.key })}>🔕 {o.label}</button>
         ))}
         <p className="small muted">ปิดเสียงแล้วถ้ามีคน @ชื่อคุณ หรือตอบกลับข้อความคุณ ยังเด้งอยู่ (ปิดได้ที่หน้า ตั้งค่าแจ้งเตือน)</p>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// เมนูห้อง (⋯): ลบแชทฝั่งฉัน · ออกจากกลุ่ม (เจ้าของต้องเลือกคนรับต่อ)
+// ---------------------------------------------------------------------
+function RoomMenu({ room, members, onClose }: { room: Room; members: RoomMember[]; onClose: () => void }) {
+  const notify = useNotify();
+  const nav = useNavigate();
+  const { me } = useMe();
+  const [busy, setBusy] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const isOwner = room.myRole === 'owner';
+  const heirs = members.filter((m) => m.id !== me.user.id && !m.isBot);
+
+  async function clear() {
+    if (!confirm('ลบแชทนี้ฝั่งคุณ? ประวัติข้อความจะหายจากเครื่องคุณ และห้องจะหายจากรายการ (คนอื่นยังเห็นครบ) — มีข้อความใหม่ห้องจะกลับมาเอง')) return;
+    setBusy(true);
+    try {
+      await api.post(`/api/rooms/${encodeURIComponent(room.id)}/clear`);
+      notify('success', 'ลบแชทแล้ว');
+      nav('/', { replace: true });
+    } catch (e) {
+      notify('error', `ลบแชทไม่สำเร็จ: ${errMsg(e)}`);
+      setBusy(false);
+    }
+  }
+
+  async function leave(transferTo?: string) {
+    const heir = transferTo ? heirs.find((h) => h.id === transferTo)?.displayName : null;
+    if (!confirm(heir ? `โอนเจ้าของกลุ่มให้ ${heir} แล้วออกจากกลุ่ม?` : `ออกจากกลุ่ม "${room.title}"? ต้องให้คนในกลุ่มเพิ่มกลับหรือใช้ลิงก์เชิญถึงจะเข้าได้อีก`)) return;
+    setBusy(true);
+    try {
+      const r = await api.post<{ warning: string | null }>(`/api/rooms/${encodeURIComponent(room.id)}/leave`, transferTo ? { transferTo } : {});
+      notify('success', 'ออกจากกลุ่มแล้ว');
+      if (r.warning) notify('warning', r.warning);
+      nav('/', { replace: true });
+    } catch (e) {
+      notify('error', `ออกจากกลุ่มไม่สำเร็จ: ${errMsg(e)}`);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head"><b className="ellipsis">{room.title}</b><button className="link" onClick={onClose}>ปิด</button></div>
+        {!picking ? (
+          <ul className="menu-list">
+            <li><button disabled={busy} onClick={() => void clear()}>🧹 ลบแชท (เฉพาะฝั่งฉัน)</button></li>
+            {room.type === 'group' && (
+              <li>
+                <button className="danger-text" disabled={busy}
+                  onClick={() => (isOwner && heirs.length > 0 ? setPicking(true) : void leave())}>
+                  🚪 ออกจากกลุ่ม
+                </button>
+              </li>
+            )}
+          </ul>
+        ) : (
+          <>
+            <p className="small">คุณเป็นเจ้าของกลุ่ม — เลือกคนรับเป็นเจ้าของต่อก่อนออก</p>
+            <ul className="user-list">
+              {heirs.map((h) => (
+                <li key={h.id} className="user-item">
+                  <Avatar name={h.displayName} url={h.pictureUrl} size={32} />
+                  <span className="grow">{h.displayName}{h.role === 'admin' ? <span className="small muted"> · แอดมิน</span> : null}</span>
+                  <button className="btn btn-small" disabled={busy} onClick={() => void leave(h.id)}>โอนแล้วออก</button>
+                </li>
+              ))}
+            </ul>
+            <button className="btn btn-ghost btn-block" disabled={busy} onClick={() => setPicking(false)}>ยกเลิก</button>
+          </>
+        )}
       </div>
     </div>
   );

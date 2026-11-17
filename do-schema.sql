@@ -3,7 +3,7 @@
 -- ตารางพวกนี้ไม่ได้อยู่ใน D1 จึงใช้ migrations/ ของ D1 ไม่ได้
 -- ตัวที่ใช้จริงอยู่ใน worker/room.ts (DO_MIGRATIONS) — ห้องจะอัปเดตตัวเองตอนถูกเปิดครั้งถัดไป
 -- แก้โครง → เพิ่มเวอร์ชันใหม่ใน DO_MIGRATIONS + เลข DO_SCHEMA_VERSION + อัปเดตไฟล์นี้ (check:rules ตรวจเลขให้ตรงกัน)
--- DO_SCHEMA_VERSION: 4
+-- DO_SCHEMA_VERSION: 5
 -- =====================================================================
 
 -- ---------- v1 ----------
@@ -30,5 +30,7 @@ CREATE TABLE messages (
   file_height      INTEGER,
   file_duration_ms INTEGER,
   file_expires_at  TEXT,
-  extra            TEXT   -- v3: JSON เช่น { formId, formTitle } / { orderId } · v4: { stickerId } / { noteId }
+  extra            TEXT,  -- v3: JSON เช่น { formId, formTitle } / { orderId } · v4: { stickerId } / { noteId }
+  deleted_at       TEXT,  -- v5: ยกเลิกส่ง/แอดมินลบ (เวลาไทย) — เนื้อหา/ไฟล์ถูกล้างแล้ว
+  deleted_by       TEXT   -- v5: 'sender' | 'admin'
 );
