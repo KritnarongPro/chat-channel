@@ -9,6 +9,7 @@ import { NoteComment, RoomNote, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 import { useNotify } from '../notice';
 import { thaiClock, thaiDate } from '../../shared/time';
+import Loading from '../Loading';
 
 export default function NotePage() {
   const { noteId = '' } = useParams();
@@ -76,7 +77,7 @@ export default function NotePage() {
     <div className="page">
       <TopBar title="📝 โน้ต" back={note ? `/room/${encodeURIComponent(note.roomId)}/notes` : '/'} />
       {error && <div className="banner banner-error" role="alert">{error}</div>}
-      {!note && !error && <p className="center muted">กำลังโหลด…</p>}
+      {!note && !error && <Loading variant="card" />}
       {note && (
         <>
           <div className="form-block">

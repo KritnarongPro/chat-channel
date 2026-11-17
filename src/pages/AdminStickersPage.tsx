@@ -8,6 +8,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { StickerPack, api, errMsg, stickerUrl } from '../api';
 import { TopBar } from '../components';
 import { useNotify } from '../notice';
+import Loading from '../Loading';
 
 const TYPES = ['image/png', 'image/webp', 'image/gif'];
 const MAX = 512 * 1024;
@@ -92,7 +93,7 @@ export default function AdminStickersPage() {
         {progress && <p className="small">{progress}</p>}
       </div>
       {error && <div className="banner banner-error" role="alert">{error}</div>}
-      {packs === null && !error && <p className="center muted">กำลังโหลด…</p>}
+      {packs === null && !error && <Loading variant="list" />}
       {packs?.length === 0 && <p className="center muted">ยังไม่มีชุดสติกเกอร์</p>}
       {packs?.map((p) => (
         <div key={p.id} className="note-card">

@@ -9,6 +9,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { thaiClock, thaiDate } from '../../shared/time';
 import { LOGIN_ERRORS, Me, api, errMsg } from '../api';
 import { escapeInAppBrowser } from '../pwa';
+import Loading from '../Loading';
 
 interface InviteInfo {
   valid: boolean; problem: string | null; problemCode: string | null;
@@ -63,7 +64,7 @@ export default function JoinPage({ me, reload }: { me: Me | null; reload: () => 
     <div className="center join">
       <div className="join-icon" aria-hidden="true">{info?.room?.type === 'channel' ? '📢' : '👥'}</div>
       {loadError && <p className="error-text" role="alert">{loadError}</p>}
-      {!info && !loadError && <p className="muted">กำลังโหลด…</p>}
+      {!info && !loadError && <Loading variant="card" />}
       {info?.room && (
         <>
           <p className="muted small">คุณได้รับเชิญเข้า{kind}</p>

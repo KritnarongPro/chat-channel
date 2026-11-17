@@ -9,6 +9,7 @@ import { User, api, errMsg } from '../api';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
+import Loading from '../Loading';
 
 type AdminUser = User & { createdAt: string; loginVia: string[]; email: string | null };
 const STATUS_TH: Record<User['status'], string> = { pending: 'รออนุมัติ', active: 'ใช้งานได้', blocked: 'ถูกระงับ' };
@@ -53,7 +54,7 @@ export default function AdminPage() {
         <Link className="chip" to="/orders">📦 ออเดอร์</Link>
       </div>
       {error && <div className="banner banner-error" role="alert">{error}</div>}
-      {users === null && !error && <p className="center muted">กำลังโหลด…</p>}
+      {users === null && !error && <Loading variant="list" />}
       <ul className="user-list">
         {users?.map((u) => (
           <li key={u.id} className="user-item admin-user">

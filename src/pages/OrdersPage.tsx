@@ -9,6 +9,7 @@ import { thaiClock, thaiDate } from '../../shared/time';
 import { Order, api, errMsg } from '../api';
 import { TopBar } from '../components';
 import { useNotify } from '../notice';
+import Loading from '../Loading';
 
 const STATUSES = Object.keys(ORDER_STATUS_TH) as OrderStatus[];
 
@@ -57,7 +58,7 @@ export default function OrdersPage() {
         {STATUSES.map((s) => <button key={s} className={`chip ${filter === s ? 'on' : ''}`} onClick={() => setFilter(s)}>{ORDER_STATUS_TH[s]}</button>)}
       </div>
       {error && <div className="banner banner-error" role="alert">{error}</div>}
-      {orders === null && !error && <p className="center muted">กำลังโหลด…</p>}
+      {orders === null && !error && <Loading variant="list" />}
       {orders?.length === 0 && <p className="center muted">ไม่มีออเดอร์</p>}
       {orders?.map((o) => (
         <div key={o.id} className="order-card">

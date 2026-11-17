@@ -8,6 +8,7 @@ import { FIELD_TYPE_TH, FieldType, FormField, MAX_FIELDS, checkFormDef } from '.
 import { Bot, FormInfo, api, errMsg } from '../api';
 import { TopBar } from '../components';
 import { useNotify } from '../notice';
+import Loading from '../Loading';
 
 interface Draft { id?: string; title: string; description: string; botId: string; active: boolean; fields: FormField[] }
 const empty = (): Draft => ({ title: '', description: '', botId: '', active: true, fields: [] });
@@ -135,7 +136,7 @@ export default function AdminFormsPage() {
     <div className="page">
       <TopBar title="แอดมิน: ฟอร์ม" back="/admin" right={<button className="btn btn-small" onClick={() => { setProblems([]); setDraft(empty()); }}>+ สร้างฟอร์ม</button>} />
       {error && <div className="banner banner-error" role="alert">{error}</div>}
-      {forms === null && !error && <p className="center muted">กำลังโหลด…</p>}
+      {forms === null && !error && <Loading variant="list" />}
       {forms?.length === 0 && <p className="center muted">ยังไม่มีฟอร์ม</p>}
       <ul className="user-list">
         {forms?.map((f) => (

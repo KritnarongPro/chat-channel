@@ -9,6 +9,7 @@ import { FormField, checkSubmission } from '../../shared/forms';
 import { api, errMsg } from '../api';
 import { TopBar } from '../components';
 import { useNotify } from '../notice';
+import Loading from '../Loading';
 
 interface FormView { id: string; title: string; description: string | null; fields: FormField[]; active: boolean }
 
@@ -57,7 +58,7 @@ export default function FormFillPage() {
     <div className="page">
       <TopBar title={form?.title ?? 'ฟอร์ม'} back={back} />
       {loadError && <div className="banner banner-error" role="alert">{loadError}</div>}
-      {!form && !loadError && <p className="center muted">กำลังโหลด…</p>}
+      {!form && !loadError && <Loading variant="card" />}
       {form && !form.active && <div className="banner banner-warning">ฟอร์มนี้ปิดรับแล้ว</div>}
       {form && (
         <form className="form-block" onSubmit={submit} noValidate>

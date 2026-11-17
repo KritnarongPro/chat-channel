@@ -7,6 +7,7 @@ import { MyNote, api, errMsg } from '../api';
 import { TopBar } from '../components';
 import { useNotify } from '../notice';
 import { thaiClock, thaiDate } from '../../shared/time';
+import Loading from '../Loading';
 
 export default function MyNotesPage() {
   const notify = useNotify();
@@ -77,7 +78,7 @@ export default function MyNotesPage() {
       ) : (
         <>
           {(notes?.length ?? 0) > 3 && <div className="form-block"><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาในโน้ต" /></div>}
-          {notes === null && !error && <p className="center muted">กำลังโหลด…</p>}
+          {notes === null && !error && <Loading variant="list" />}
           {notes?.length === 0 && <p className="center muted">ยังไม่มีโน้ต — กด "+ โน้ตใหม่"</p>}
           {shown.map((n) => (
             <div key={n.id} className="note-card">

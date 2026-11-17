@@ -10,6 +10,7 @@ import { useNavigate } from 'react-router';
 import { LOGIN_ERRORS, api, errMsg } from '../api';
 import { TopBar } from '../components';
 import { useNotify } from '../notice';
+import Loading from '../Loading';
 
 interface Identities { line: boolean; google: { email: string | null } | null; googleReady: boolean }
 
@@ -43,7 +44,7 @@ export default function AccountPage() {
     <div className="page">
       <TopBar title="บัญชี" back="/" />
       {error && <div className="banner banner-error" role="alert">{error} <button className="link" onClick={() => void load()}>ลองใหม่</button></div>}
-      {!ids && !error && <p className="center muted">กำลังโหลด…</p>}
+      {!ids && !error && <Loading variant="card" />}
       {ids && (
         <div className="form-block">
           <h3 className="section-title">บัญชีที่ใช้เข้าสู่ระบบ</h3>

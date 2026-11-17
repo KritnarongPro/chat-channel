@@ -8,6 +8,7 @@ import { api, errMsg } from '../api';
 import { TopBar } from '../components';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
+import Loading from '../Loading';
 
 interface Channel {
   id: string; title: string; description: string | null; visibility: 'public' | 'private';
@@ -83,7 +84,7 @@ export default function ChannelsPage() {
         </form>
       )}
       {error && <div className="banner banner-error" role="alert">{error}</div>}
-      {channels === null && !error && <p className="center muted">กำลังโหลด…</p>}
+      {channels === null && !error && <Loading variant="list" />}
       {channels?.length === 0 && <p className="center muted">ยังไม่มีชาเนล</p>}
       <ul className="user-list">
         {channels?.map((ch) => (

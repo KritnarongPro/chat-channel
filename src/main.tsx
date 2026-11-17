@@ -36,6 +36,7 @@ import LinkGooglePage from './pages/LinkGooglePage';
 import { applyPrefs, cachedPrefs, Prefs } from './prefs';
 import { useNotify } from './notice';
 import './styles.css';
+import Loading from './Loading';
 
 /** เฟส 5: โหลดธีม/ขนาดตัวอักษรจากบัญชี (ค่าในเครื่องใส่ไว้แล้วตอนเปิดแอป) — โหลดไม่ได้แจ้งเตือน ไม่ข้ามเงียบ */
 function PrefsLoader() {
@@ -83,7 +84,8 @@ function App() {
   useEffect(() => { void reload(); }, [reload]);
 
   const location = useLocation();
-  if (state === 'loading') return <div className="center muted">กำลังโหลด…</div>;
+  // เปิดแอป: โครงร่างหน้ารายการแชท (เกิน 10 วิ → แจ้ง + ลองใหม่)
+  if (state === 'loading') return <Loading variant="shell" onRetry={() => void reload()} />;
 
   // ลิงก์เชิญ /join/<รหัส>: เปิดได้ทั้งยังไม่ล็อกอิน / รออนุมัติ / ใช้งานอยู่
   if (location.pathname.startsWith('/join/') && state !== 'error') {
