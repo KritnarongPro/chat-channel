@@ -2,7 +2,7 @@
 // media.ts — งานไฟล์ฝั่งหน้าเว็บ: ย่อรูป, เลือกรูปแบบอัดเสียง, แสดงขนาดไฟล์
 // =====================================================================
 
-import { IMAGE_MAX_SIDE, IMAGE_MIMES } from '../shared/protocol';
+import { IMAGE_MAX_SIDE, IMAGE_MIMES, VIDEO_MIMES } from '../shared/protocol';
 
 export interface PreparedImage { blob: Blob; mime: string; name: string; width: number; height: number }
 
@@ -64,4 +64,35 @@ export function formatSize(bytes: number): string {
 export function formatDuration(ms: number): string {
   const s = Math.round(ms / 1000);
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// ---------- วิดีโอ (2026-11-17): ไม่ย่อ (ผู้ใช้เลือก 50MB) — อ่านแค่ขนาดภาพ + ความยาว ----------
+export interface PreparedVideo { blob: Blob; mime: string; name: string; width?: number; height?: number; durationMs?: number }
+
+/** ตรวจชนิด + อ่านขนาด/ความยาว (อ่านไม่ได้ เช่น HEVC บน Android → ยังส่งได้ แค่ไม่มีข้อมูลขนาด) */
+export async function prepareVideo(file: File): Promise<PreparedVideo> {
+  const mime = (file.type || '').toLowerCase() || (file.name.toLowerCase().endsWith('.mov') ? 'video/quicktime' : '');
+  if (!VIDEO_MIMES.includes(mime)) {
+    throw new Error(`ชนิดวิดีโอไม่รองรับ (${mime || 'ไม่ทราบชนิด'}) — รองรับ MP4, MOV, WEBM, 3GP · ลองกด "ส่งเป็นไฟล์" แทน`);
+  }
+  const url = URL.createObjectURL(file);
+  try {
+    const meta = await new Promise<{ w: number; h: number; d: number } | null>((resolve) => {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.muted = true;
+      const done = (r: { w: number; h: number; d: number } | null) => { clearTimeout(t); resolve(r); };
+      const t = window.setTimeout(() => done(null), 5000);
+      v.onloadedmetadata = () => done({ w: v.videoWidth, h: v.videoHeight, d: v.duration });
+      v.onerror = () => done(null);
+      v.src = url;
+    });
+    return {
+      blob: file, mime, name: file.name || 'วิดีโอ',
+      width: meta?.w || undefined, height: meta?.h || undefined,
+      durationMs: meta && Number.isFinite(meta.d) ? Math.round(meta.d * 1000) : undefined,
+    };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }

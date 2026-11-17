@@ -3,7 +3,7 @@
 // ทุก error จาก server ถูกโยนเป็น ApiError พร้อมข้อความไทย ให้หน้าเว็บแสดงผู้ใช้
 // =====================================================================
 
-import type { ChatMessage } from '../shared/protocol';
+import type { ChatMessage, FileKind } from '../shared/protocol';
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -53,7 +53,7 @@ export const api = {
 export function uploadFile(
   roomId: string,
   blob: Blob,
-  meta: { kind: 'image' | 'file' | 'voice'; name: string; mime: string; width?: number; height?: number; durationMs?: number },
+  meta: { kind: FileKind; name: string; mime: string; width?: number; height?: number; durationMs?: number },
   onProgress: (pct: number) => void,
 ): Promise<{ fileId: string }> {
   return new Promise((resolve, reject) => {
@@ -117,10 +117,18 @@ export interface Room {
   myRole: string;
   muted: boolean;                              // เฟส 3: ปิดแจ้งเตือนห้องนี้ (คิดจาก mutedUntil แล้ว)
   mutedUntil: string | null;                   // แจ้งเตือน: ปิดเสียงถึงเวลาไหน (null = ตลอด / ไม่ได้ปิด)
-  pinned: { seq: number; text: string; sender: string | null; at: string } | null;  // ข้อความที่ปักหมุด
+  pins?: RoomPin[];   // ปักหมุด/ประกาศ (สูงสุด 5 · ใหม่สุดก่อน) — มีเฉพาะจาก GET /api/rooms/:id
   visibility: 'public' | 'private' | null;     // เฟส 3: ชาเนลสาธารณะ/ส่วนตัว
   description: string | null;
   canPost: boolean;                            // ชาเนล: เฉพาะเจ้าของ/แอดมินชาเนล
+}
+
+export interface RoomPin { seq: number; text: string; sender: string | null; at: string }
+
+/** ตัวอย่างลิงก์ (GET /api/link-preview) */
+export interface LinkPreviewInfo {
+  url: string; status: 'ok' | 'failed'; title: string | null; description: string | null; siteName: string | null;
+  hasImage: boolean; error: string | null;
 }
 
 export interface RoomMember { id: string; displayName: string; pictureUrl: string | null; role: string; isBot?: boolean }  // isBot: ใช้เลือกผู้รับเจ้าของกลุ่ม (บอทรับไม่ได้)

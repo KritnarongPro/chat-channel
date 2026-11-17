@@ -8,15 +8,16 @@
 //   3. งานเขียนลง D1 (ข้อความล่าสุดของห้อง, อ่านถึงไหน) — ล้มเหลว → แจ้งผู้ส่งเสมอ
 //   4. แจ้งเตือนบนมือถือ (เฟส 3): หาผู้รับ → ใส่งานใน Queue chat-push (ไม่ส่งให้คนที่เปิดห้องนี้อยู่)
 //   6. ฟีเจอร์แชท (2026-11-17): อ่านแล้ว · รีแอคชัน · ค้นหาในห้อง (ส่งต่อ = worker เรียก /post พร้อม forwardedFrom)
+//   7. ฟีเจอร์แชทชุด 2 (2026-11-17): วิดีโอ · อัลบั้ม (extra.albumId) · โพล · กำลังพิมพ์
 //
 // worker ตรวจล็อกอิน + สิทธิ์สมาชิกห้องก่อนส่งต่อมาที่นี่ แล้วแนบหัว X-User-Id / X-User-Name / X-Room-Id
 // =====================================================================
 
 import { DurableObject } from 'cloudflare:workers';
-import { nowThai } from '../shared/time';
+import { nowThai, toThaiIso } from '../shared/time';
 import {
-  ChatMessage, ClientFrame, MessageExtra, ReactionGroup, ReadState, ServerFrame,
-  HISTORY_LIMIT, MAX_MESSAGE_CHARS, REACTIONS, SYNC_LIMIT,
+  ChatMessage, ClientFrame, MessageExtra, PollCreate, PollState, ReactionGroup, ReadState, ServerFrame,
+  HISTORY_LIMIT, MAX_MESSAGE_CHARS, POLL_MAX_OPTIONS, POLL_OPTION_MAX, POLL_QUESTION_MAX, REACTIONS, SYNC_LIMIT,
 } from '../shared/protocol';
 import { DM_ALLOWED_SQL, type Env } from './lib';
 import type { PushJob } from './push';
@@ -24,7 +25,7 @@ import type { PushJob } from './push';
 // =====================================================================
 // 0. โครงตารางในห้อง — ต้องตรงกับ do-schema.sql (check:rules ตรวจเลขเวอร์ชัน)
 // =====================================================================
-export const DO_SCHEMA_VERSION = 6;
+export const DO_SCHEMA_VERSION = 7;
 
 const DO_MIGRATIONS: Record<number, string[]> = {
   1: [
@@ -133,6 +134,51 @@ const DO_MIGRATIONS: Record<number, string[]> = {
        PRIMARY KEY (seq, user_id)
      )`,
   ],
+  // v7 (2026-11-17): ชนิดข้อความ video / poll (แก้ CHECK เดิมไม่ได้ → สร้างใหม่แล้วย้ายข้อมูล) + ตารางโพล
+  7: [
+    `CREATE TABLE messages_v7 (
+       seq             INTEGER PRIMARY KEY AUTOINCREMENT,
+       id              TEXT NOT NULL UNIQUE,
+       sender_id       TEXT NOT NULL,
+       sender_name     TEXT NOT NULL,
+       kind            TEXT NOT NULL CHECK (kind IN ('text', 'image', 'file', 'voice', 'form', 'sticker', 'video', 'poll')),
+       body            TEXT NOT NULL,
+       created_at      TEXT NOT NULL,
+       file_id         TEXT,
+       file_name       TEXT,
+       file_mime       TEXT,
+       file_size       INTEGER,
+       file_width      INTEGER,
+       file_height     INTEGER,
+       file_duration_ms INTEGER,
+       file_expires_at TEXT,
+       extra           TEXT,
+       deleted_at      TEXT,
+       deleted_by      TEXT
+     )`,
+    `INSERT INTO messages_v7 (seq, id, sender_id, sender_name, kind, body, created_at, file_id, file_name, file_mime,
+                              file_size, file_width, file_height, file_duration_ms, file_expires_at, extra, deleted_at, deleted_by)
+       SELECT seq, id, sender_id, sender_name, kind, body, created_at, file_id, file_name, file_mime,
+              file_size, file_width, file_height, file_duration_ms, file_expires_at, extra, deleted_at, deleted_by FROM messages`,
+    `DROP TABLE messages`,
+    `ALTER TABLE messages_v7 RENAME TO messages`,
+    `CREATE TABLE IF NOT EXISTS polls (
+       seq        INTEGER PRIMARY KEY,
+       options    TEXT NOT NULL,
+       multi      INTEGER NOT NULL DEFAULT 0,
+       closes_at  TEXT,
+       closed_at  TEXT,
+       created_by TEXT NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS poll_votes (
+       seq        INTEGER NOT NULL,
+       option_idx INTEGER NOT NULL,
+       user_id    TEXT NOT NULL,
+       user_name  TEXT NOT NULL,
+       voted_at   TEXT NOT NULL,
+       PRIMARY KEY (seq, user_id, option_idx)
+     )`,
+  ],
 };
 
 /** ยกเลิกส่งข้อความของตัวเองได้ภายในเวลานี้ (ผู้ใช้เลือก 24 ชม. แบบ LINE) · แอดมินห้องลบได้ทุกเวลา */
@@ -174,20 +220,27 @@ const msgOut = (r: MsgRow): ChatMessage => (r.deleted_at ? {
 });
 
 /** ข้อความย่อสำหรับหน้ารายการแชท */
-const PREVIEW: Record<ChatMessage['kind'], string> = { text: '', image: '[รูปภาพ]', file: '[ไฟล์]', voice: '[ข้อความเสียง]', form: '[ฟอร์ม]', sticker: '[สติกเกอร์]' };
+const PREVIEW: Record<ChatMessage['kind'], string> = {
+  text: '', image: '[รูปภาพ]', file: '[ไฟล์]', voice: '[ข้อความเสียง]', form: '[ฟอร์ม]', sticker: '[สติกเกอร์]', video: '[วิดีโอ]', poll: '[โพล]',
+};
 function previewOf(m: ChatMessage): string {
   if (m.kind === 'text') return m.body.slice(0, 120);
   if (m.kind === 'form') return `[ฟอร์ม] ${m.extra?.formTitle ?? ''}`.slice(0, 120);
+  if (m.kind === 'poll') return `[โพล] ${m.body}`.slice(0, 120);
   const label = m.kind === 'file' && m.file ? `[ไฟล์] ${m.file.name}` : PREVIEW[m.kind];
   return (m.body ? `${label} ${m.body}` : label).slice(0, 120);
 }
 
-interface RoomInfo { type: 'dm' | 'group' | 'channel'; title: string | null; senderIsBot: boolean; senderSysRole: string | null }
+interface RoomInfo { type: 'dm' | 'group' | 'channel'; title: string | null; senderIsBot: boolean; senderSysRole: string | null; role: string }
 
-const MSG_KINDS = ['text', 'image', 'file', 'voice', 'form', 'sticker'] as const;
+const MSG_KINDS = ['text', 'image', 'file', 'voice', 'form', 'sticker', 'video', 'poll'] as const;
+const FILE_KINDS = ['image', 'file', 'voice', 'video'];
+const ALBUM_ID_RE = /^[A-Za-z0-9_-]{8,40}$/;
+const POLL_MAX_DAYS = 30;
+const TYPING_MIN_MS = 2500;  // กำลังพิมพ์: กระจายต่อคนไม่ถี่กว่านี้
 
 type FileRow = {
-  id: string; room_id: string; uploader_id: string; kind: 'image' | 'file' | 'voice'; mime: string; name: string;
+  id: string; room_id: string; uploader_id: string; kind: 'image' | 'file' | 'voice' | 'video'; mime: string; name: string;
   size: number; width: number | null; height: number | null; duration_ms: number | null; status: string; expires_at: string;
 };
 
@@ -283,7 +336,7 @@ export class ChatRoom extends DurableObject<Env> {
         `SELECT * FROM messages WHERE seq < ? AND seq > ? ORDER BY seq DESC LIMIT ?`, before, after, limit + 1,
       ).toArray();
       const hasMore = rows.length > limit;
-      const messages = this.withReactions(rows.slice(0, limit).reverse().map(msgOut));
+      const messages = this.withExtras(rows.slice(0, limit).reverse().map(msgOut));
       return json({ ok: true, data: { messages, hasMore } });
     }
 
@@ -344,6 +397,8 @@ export class ChatRoom extends DurableObject<Env> {
       const at = nowThai();
       try {
         this.sql.exec(`DELETE FROM reactions WHERE seq = ?`, seq);
+        this.sql.exec(`DELETE FROM poll_votes WHERE seq = ?`, seq);
+        this.sql.exec(`DELETE FROM polls WHERE seq = ?`, seq);
         this.sql.exec(
           `UPDATE messages SET deleted_at = ?, deleted_by = ?, body = '', extra = NULL,
                   file_id = NULL, file_name = NULL, file_mime = NULL, file_size = NULL, file_width = NULL,
@@ -444,6 +499,15 @@ export class ChatRoom extends DurableObject<Env> {
       case 'react':
         await this.handleReact(ws, info, frame.seq, frame.emoji);
         return;
+      case 'typing':
+        this.handleTyping(ws, info);
+        return;
+      case 'vote':
+        await this.handleVote(ws, info, frame.seq, frame.options);
+        return;
+      case 'poll_close':
+        await this.handlePollClose(ws, info, frame.seq);
+        return;
       case 'read':
         await this.handleRead(ws, info, frame.seq);
         return;
@@ -482,13 +546,13 @@ export class ChatRoom extends DurableObject<Env> {
         `SELECT * FROM messages WHERE seq > ? ORDER BY seq DESC LIMIT ?`, clearedSeq, HISTORY_LIMIT,
       ).toArray().reverse();
       const total = this.sql.exec<{ n: number }>(`SELECT COUNT(*) AS n FROM messages WHERE seq > ?`, clearedSeq).one().n;
-      this.send(ws, { type: 'sync', messages: this.withReactions(rows.map(msgOut)), hasMore: total > rows.length });
+      this.send(ws, { type: 'sync', messages: this.withExtras(rows.map(msgOut)), hasMore: total > rows.length });
       return;
     }
     rows = this.sql.exec<MsgRow>(
       `SELECT * FROM messages WHERE seq > ? ORDER BY seq ASC LIMIT ?`, Math.max(afterSeq, clearedSeq), SYNC_LIMIT + 1,
     ).toArray();
-    this.send(ws, { type: 'sync', messages: this.withReactions(rows.slice(0, SYNC_LIMIT).map(msgOut)), hasMore: rows.length > SYNC_LIMIT });
+    this.send(ws, { type: 'sync', messages: this.withExtras(rows.slice(0, SYNC_LIMIT).map(msgOut)), hasMore: rows.length > SYNC_LIMIT });
   }
 
   private async handleSend(
@@ -524,9 +588,18 @@ export class ChatRoom extends DurableObject<Env> {
       out({ type: 'error', clientId, code: 'NO_STICKER', message: 'ไม่ได้ระบุสติกเกอร์ที่จะส่ง' });
       return null;
     }
-    if ((kind === 'image' || kind === 'file' || kind === 'voice') && (typeof fileId !== 'string' || !fileId)) {
+    if (FILE_KINDS.includes(kind) && (typeof fileId !== 'string' || !fileId)) {
       out({ type: 'error', clientId, code: 'NO_FILE', message: 'ไม่พบไฟล์ที่จะส่ง กรุณาอัปโหลดใหม่' });
       return null;
+    }
+
+    // ---------- โพล: body = คำถาม · extra.pollCreate = ตัวเลือก (ตรวจครบก่อนแตะอะไร) ----------
+    let poll: PollCreate | null = null;
+    if (kind === 'poll') {
+      const r = checkPollCreate(body, (extra as MessageExtra | undefined)?.pollCreate);
+      if (typeof r === 'string') { out({ type: 'error', clientId, code: 'BAD_POLL', message: r }); return null; }
+      poll = r;
+      body = body.trim();
     }
 
     // ---------- ส่งซ้ำ (เช่นกดส่งใหม่หลังเน็ตหลุด) → ตอบลำดับเดิม ไม่บันทึกซ้ำ ----------
@@ -542,7 +615,7 @@ export class ChatRoom extends DurableObject<Env> {
 
     // ---------- ไฟล์: ตรวจใน D1 แล้วจองไว้ (uploaded → attached) ก่อนบันทึกข้อความ ----------
     let file: FileRow | null = null;
-    if (kind === 'image' || kind === 'file' || kind === 'voice') {
+    if (FILE_KINDS.includes(kind)) {
       file = await this.claimFile(out, clientId, info, kind, fileId as string);
       if (!file) return null;
     }
@@ -588,6 +661,17 @@ export class ChatRoom extends DurableObject<Env> {
       extraOut = { orderId: (extra as MessageExtra).orderId }; // ข้อความแจ้งสถานะออเดอร์ (ระบบใส่ให้)
     }
 
+    // ---------- โพล: ใช้ได้เฉพาะกลุ่ม/ชาเนล (ชาเนล = เจ้าของ/แอดมินอยู่แล้วจาก checkPoster) ----------
+    if (kind === 'poll' && room.type === 'dm') {
+      out({ type: 'error', clientId, code: 'POLL_ROOM_TYPE', message: 'สร้างโพลได้เฉพาะในกลุ่มและชาเนล' });
+      return null;
+    }
+    // ---------- อัลบั้ม: รูป/วิดีโอที่ส่งพร้อมกัน ----------
+    const albumId = (extra as MessageExtra | undefined)?.albumId;
+    if ((kind === 'image' || kind === 'video') && typeof albumId === 'string' && ALBUM_ID_RE.test(albumId)) {
+      extraOut = { ...(extraOut ?? {}), albumId };
+    }
+
     // ---------- ส่งต่อ: ป้าย "ส่งต่อจาก ชื่อ" (ผู้ใช้เลือก) — รับเฉพาะจาก worker ผ่าน /post ----------
     if (forwardedFrom) extraOut = { ...(extraOut ?? {}), forwardedFrom };
 
@@ -613,15 +697,25 @@ export class ChatRoom extends DurableObject<Env> {
     // ---------- บันทึก ----------
     let row: MsgRow;
     try {
-      row = this.sql.exec<MsgRow>(
-        `INSERT INTO messages (id, sender_id, sender_name, kind, body, created_at,
-           file_id, file_name, file_mime, file_size, file_width, file_height, file_duration_ms, file_expires_at, extra)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
-        clientId, info.userId, info.userName, kind, body, nowThai(),
-        file?.id ?? null, file?.name ?? null, file?.mime ?? null, file?.size ?? null,
-        file?.width ?? null, file?.height ?? null, file?.duration_ms ?? null, file?.expires_at ?? null,
-        extraOut ? JSON.stringify(extraOut) : null,
-      ).one();
+      // ข้อความ + โพล บันทึกพร้อมกัน (พลาดอันใดอันหนึ่ง = ไม่บันทึกทั้งคู่)
+      row = this.ctx.storage.transactionSync(() => {
+        const r = this.sql.exec<MsgRow>(
+          `INSERT INTO messages (id, sender_id, sender_name, kind, body, created_at,
+             file_id, file_name, file_mime, file_size, file_width, file_height, file_duration_ms, file_expires_at, extra)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`,
+          clientId, info.userId, info.userName, kind, body, nowThai(),
+          file?.id ?? null, file?.name ?? null, file?.mime ?? null, file?.size ?? null,
+          file?.width ?? null, file?.height ?? null, file?.duration_ms ?? null, file?.expires_at ?? null,
+          extraOut ? JSON.stringify(extraOut) : null,
+        ).one();
+        if (poll) {
+          this.sql.exec(
+            `INSERT INTO polls (seq, options, multi, closes_at, created_by) VALUES (?, ?, ?, ?, ?)`,
+            r.seq, JSON.stringify(poll.options), poll.multi ? 1 : 0, poll.closesAt, info.userId,
+          );
+        }
+        return r;
+      });
     } catch (err) {
       console.error('บันทึกข้อความไม่สำเร็จ', err);
       if (file) await this.releaseFile(file.id);
@@ -629,7 +723,7 @@ export class ChatRoom extends DurableObject<Env> {
       return null;
     }
 
-    const message = msgOut(row);
+    const message = this.withExtras([msgOut(row)])[0];
     out({ type: 'ack', clientId, seq: message.seq });
     this.broadcast({ type: 'message', message });
 
@@ -681,7 +775,7 @@ export class ChatRoom extends DurableObject<Env> {
       out({ type: 'error', clientId, code: 'NOT_FRIEND', message: 'ส่งไม่ได้: คุณกับอีกฝ่ายยังไม่ได้เป็นเพื่อนกัน (หรือเลิกเป็นเพื่อนแล้ว) — ส่งคำขอเป็นเพื่อนที่หน้า "เพื่อน" ก่อน' });
       return null;
     }
-    return { type: r.type, title: r.title, senderIsBot: r.is_bot === 1, senderSysRole: r.sys_role };
+    return { type: r.type, title: r.title, senderIsBot: r.is_bot === 1, senderSysRole: r.sys_role, role: r.role };
   }
 
   // =====================================================================
@@ -815,6 +909,8 @@ export class ChatRoom extends DurableObject<Env> {
       : m.kind === 'voice' ? '[ข้อความเสียง]'
       : m.kind === 'form' ? `[ฟอร์ม] ${m.extra?.formTitle ?? ''}`
       : m.kind === 'sticker' ? '[สติกเกอร์]'
+      : m.kind === 'video' ? `[วิดีโอ]${m.body ? ' ' + m.body : ''}`
+      : m.kind === 'poll' ? `[โพล] ${m.body}`
       : `[ไฟล์] ${m.file?.name ?? ''}`;
     const title = room.type === 'dm' ? m.senderName : (room.title ?? (room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม'));
     const body = (room.type === 'group' ? `${m.senderName}: ${text}` : text).slice(0, 200);
@@ -900,18 +996,26 @@ export class ChatRoom extends DurableObject<Env> {
     }
   }
 
-  /** รีแอคชันของข้อความชุดหนึ่ง (อ่านครั้งเดียวตามช่วง seq) */
-  private withReactions(msgs: ChatMessage[]): ChatMessage[] {
+  /** แนบรีแอคชัน + สถานะโพลให้ข้อความชุดหนึ่ง (อ่านครั้งเดียวตามช่วง seq) */
+  private withExtras(msgs: ChatMessage[]): ChatMessage[] {
     if (msgs.length === 0) return msgs;
     const seqs = msgs.map((m) => m.seq);
+    const lo = Math.min(...seqs), hi = Math.max(...seqs);
     const rows = this.sql.exec<{ seq: number; user_id: string; user_name: string; emoji: string }>(
-      `SELECT seq, user_id, user_name, emoji FROM reactions WHERE seq BETWEEN ? AND ? ORDER BY created_at`,
-      Math.min(...seqs), Math.max(...seqs),
+      `SELECT seq, user_id, user_name, emoji FROM reactions WHERE seq BETWEEN ? AND ? ORDER BY created_at`, lo, hi,
     ).toArray();
-    if (rows.length === 0) return msgs;
     const bySeq = new Map<number, typeof rows>();
     for (const r of rows) bySeq.set(r.seq, [...(bySeq.get(r.seq) ?? []), r]);
-    return msgs.map((m) => (bySeq.has(m.seq) ? { ...m, reactions: groupReactions(bySeq.get(m.seq)!) } : m));
+    const hasPoll = msgs.some((m) => m.kind === 'poll' && !m.deleted);
+    return msgs.map((m) => {
+      let out = m;
+      if (bySeq.has(m.seq)) out = { ...out, reactions: groupReactions(bySeq.get(m.seq)!) };
+      if (hasPoll && m.kind === 'poll' && !m.deleted) {
+        const poll = this.pollState(m.seq);
+        if (poll) out = { ...out, poll };
+      }
+      return out;
+    });
   }
 
   /** กด/เปลี่ยน/เอาออก รีแอคชัน — ตรวจสิทธิ์จาก D1 เหมือนการส่ง (ผู้ติดตามชาเนลกดได้) */
@@ -949,6 +1053,107 @@ export class ChatRoom extends DurableObject<Env> {
     ).toArray();
     this.broadcast({ type: 'reactions', seq, reactions: groupReactions(rows) });
   }
+
+  // =====================================================================
+  // 7. ฟีเจอร์แชทชุด 2 (2026-11-17): กำลังพิมพ์ · โพล
+  // =====================================================================
+  private lastTyping = new Map<string, number>();
+
+  /** กำลังพิมพ์: ไม่บันทึกอะไร กระจายให้คนอื่นที่เปิดห้องอยู่ · ชาเนลไม่แสดง */
+  private handleTyping(ws: WebSocket, info: SocketInfo) {
+    if (info.roomType === 'channel') return;
+    const now = Date.now();
+    if (now - (this.lastTyping.get(info.userId) ?? 0) < TYPING_MIN_MS) return;
+    this.lastTyping.set(info.userId, now);
+    for (const s of this.ctx.getWebSockets()) {
+      if (s === ws) continue;
+      const i = s.deserializeAttachment() as SocketInfo | null;
+      if (i && i.userId !== info.userId) this.send(s, { type: 'typing', userId: info.userId, name: info.userName });
+    }
+  }
+
+  /** สถานะโพลปัจจุบัน (null = ไม่มีโพลนี้) */
+  private pollState(seq: number): PollState | null {
+    const p = this.sql.exec<{ options: string; multi: number; closes_at: string | null; closed_at: string | null; created_by: string }>(
+      `SELECT options, multi, closes_at, closed_at, created_by FROM polls WHERE seq = ?`, seq,
+    ).toArray()[0];
+    if (!p) return null;
+    let texts: string[];
+    try {
+      texts = JSON.parse(p.options) as string[];
+    } catch (err) {
+      console.error('อ่านตัวเลือกโพลไม่ได้', seq, err);
+      texts = [];
+    }
+    const votes = this.sql.exec<{ option_idx: number; user_id: string; user_name: string }>(
+      `SELECT option_idx, user_id, user_name FROM poll_votes WHERE seq = ? ORDER BY voted_at`, seq,
+    ).toArray();
+    return {
+      options: texts.map((text, i) => ({
+        text, voters: votes.filter((v) => v.option_idx === i).map((v) => ({ id: v.user_id, name: v.user_name })),
+      })),
+      multi: p.multi === 1, closesAt: p.closes_at, closedAt: p.closed_at, createdBy: p.created_by,
+    };
+  }
+
+  /** โหวต: แทนที่คำตอบเดิมทั้งหมดของคนนี้ ([] = ถอนโหวต) — เปลี่ยนได้จนกว่าโพลจะปิด */
+  private async handleVote(ws: WebSocket, info: SocketInfo, seq: unknown, options: unknown) {
+    const err = (code: string, message: string) => this.send(ws, { type: 'error', code, message });
+    if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 1) return err('BAD_SEQ', 'ระบุโพลไม่ถูกต้อง');
+    if (!Array.isArray(options) || !options.every((o) => Number.isInteger(o)) || new Set(options).size !== options.length) {
+      return err('BAD_VOTE', 'ตัวเลือกที่โหวตไม่ถูกต้อง');
+    }
+    const msg = this.sql.exec<{ deleted_at: string | null }>(`SELECT deleted_at FROM messages WHERE seq = ? AND kind = 'poll'`, seq).toArray()[0];
+    const poll = msg && !msg.deleted_at && seq > (info.clearedSeq ?? 0) ? this.pollState(seq) : null;
+    if (!poll) return err('POLL_NOT_FOUND', 'ไม่พบโพลนี้ (อาจถูกลบแล้ว)');
+    if (poll.closedAt || (poll.closesAt && poll.closesAt <= nowThai())) return err('POLL_CLOSED', 'โพลนี้ปิดโหวตแล้ว');
+    if (!poll.multi && options.length > 1) return err('POLL_SINGLE', 'โพลนี้เลือกได้ข้อเดียว');
+    if (options.some((o: number) => o < 0 || o >= poll.options.length)) return err('BAD_VOTE', 'ไม่มีตัวเลือกนี้ในโพล');
+    const frames: ServerFrame[] = [];
+    const room = await this.checkPoster((f) => frames.push(f), 'vote', info, 'react');
+    if (!room) {
+      const e = frames.find((f) => f.type === 'error') as { code: string; message: string } | undefined;
+      return err(e?.code ?? 'VOTE_FAILED', `โหวตไม่ได้: ${e?.message ?? 'ตรวจสิทธิ์ไม่ผ่าน'}`);
+    }
+    try {
+      const at = nowThai();
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec(`DELETE FROM poll_votes WHERE seq = ? AND user_id = ?`, seq, info.userId);
+        for (const o of options as number[]) {
+          this.sql.exec(`INSERT INTO poll_votes (seq, option_idx, user_id, user_name, voted_at) VALUES (?, ?, ?, ?, ?)`, seq, o, info.userId, info.userName, at);
+        }
+      });
+    } catch (e) {
+      console.error('บันทึกโหวตไม่สำเร็จ', e);
+      return err('VOTE_FAILED', 'บันทึกโหวตไม่สำเร็จ (ที่เก็บข้อความขัดข้อง) กรุณาลองใหม่');
+    }
+    this.broadcast({ type: 'poll', seq, poll: this.pollState(seq)! });
+  }
+
+  /** ปิดโหวตก่อนเวลา: คนสร้างโพล หรือเจ้าของ/แอดมินห้อง (ตำแหน่งอ่านจาก D1 ตอนนี้) */
+  private async handlePollClose(ws: WebSocket, info: SocketInfo, seq: unknown) {
+    const err = (code: string, message: string) => this.send(ws, { type: 'error', code, message });
+    if (typeof seq !== 'number' || !Number.isInteger(seq)) return err('BAD_SEQ', 'ระบุโพลไม่ถูกต้อง');
+    const poll = this.pollState(seq);
+    if (!poll) return err('POLL_NOT_FOUND', 'ไม่พบโพลนี้ (อาจถูกลบแล้ว)');
+    if (poll.closedAt || (poll.closesAt && poll.closesAt <= nowThai())) return err('POLL_CLOSED', 'โพลนี้ปิดโหวตแล้ว');
+    const frames: ServerFrame[] = [];
+    const room = await this.checkPoster((f) => frames.push(f), 'poll_close', info, 'react');
+    if (!room) {
+      const e = frames.find((f) => f.type === 'error') as { code: string; message: string } | undefined;
+      return err(e?.code ?? 'POLL_CLOSE_FAILED', `ปิดโพลไม่ได้: ${e?.message ?? 'ตรวจสิทธิ์ไม่ผ่าน'}`);
+    }
+    if (poll.createdBy !== info.userId && room.role !== 'owner' && room.role !== 'admin') {
+      return err('NOT_POLL_OWNER', 'ปิดโพลได้เฉพาะคนสร้างโพล หรือเจ้าของ/แอดมินห้อง');
+    }
+    try {
+      this.sql.exec(`UPDATE polls SET closed_at = ? WHERE seq = ? AND closed_at IS NULL`, nowThai(), seq);
+    } catch (e) {
+      console.error('ปิดโพลไม่สำเร็จ', e);
+      return err('POLL_CLOSE_FAILED', 'ปิดโพลไม่สำเร็จ (ที่เก็บข้อความขัดข้อง) กรุณาลองใหม่');
+    }
+    this.broadcast({ type: 'poll', seq, poll: this.pollState(seq)! });
+  }
 }
 
 /** รวมรีแอคชันเป็นกลุ่มตามอีโมจิ เรียงตามลำดับใน REACTIONS */
@@ -960,4 +1165,26 @@ function groupReactions(rows: { user_id: string; user_name: string; emoji: strin
     map.set(r.emoji, g);
   }
   return [...map.values()].sort((a, b) => REACTIONS.indexOf(a.emoji as never) - REACTIONS.indexOf(b.emoji as never));
+}
+
+/** ตรวจข้อมูลสร้างโพล — ผิดคืนข้อความเหตุผล (ภาษาไทย) */
+function checkPollCreate(question: string, raw: unknown): PollCreate | string {
+  const q = question.trim();
+  if (q.length < 1 || q.length > POLL_QUESTION_MAX) return `คำถามโพลต้องยาว 1–${POLL_QUESTION_MAX} ตัวอักษร`;
+  if (!raw || typeof raw !== 'object') return 'ไม่ได้ระบุตัวเลือกของโพล';
+  const p = raw as { options?: unknown; multi?: unknown; closesAt?: unknown };
+  if (!Array.isArray(p.options)) return 'ไม่ได้ระบุตัวเลือกของโพล';
+  const options = p.options.map((o) => (typeof o === 'string' ? o.trim() : ''));
+  if (options.length < 2 || options.length > POLL_MAX_OPTIONS) return `โพลต้องมี 2–${POLL_MAX_OPTIONS} ตัวเลือก`;
+  if (options.some((o) => o.length < 1 || o.length > POLL_OPTION_MAX)) return `ตัวเลือกแต่ละข้อต้องยาว 1–${POLL_OPTION_MAX} ตัวอักษร (ห้ามว่าง)`;
+  if (new Set(options.map((o) => o.toLowerCase())).size !== options.length) return 'มีตัวเลือกซ้ำกัน';
+  let closesAt: string | null = null;
+  if (p.closesAt !== null && p.closesAt !== undefined) {
+    const t = typeof p.closesAt === 'string' ? Date.parse(p.closesAt) : NaN;
+    if (!Number.isFinite(t)) return 'เวลาปิดโหวตไม่ถูกต้อง';
+    if (t <= Date.now()) return 'เวลาปิดโหวตต้องอยู่ในอนาคต';
+    if (t > Date.now() + POLL_MAX_DAYS * 86400_000) return `ตั้งเวลาปิดโหวตได้ไม่เกิน ${POLL_MAX_DAYS} วัน`;
+    closesAt = toThaiIso(t);  // เก็บเป็นเวลาไทยเสมอ (เทียบเป็นข้อความกับ nowThai ได้)
+  }
+  return { options, multi: p.multi === true, closesAt };
 }

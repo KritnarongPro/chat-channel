@@ -8,14 +8,16 @@
 // ลบแชท: ยกเลิกส่ง (24 ชม.) / แอดมินลบ ในเมนู ⋯ ของข้อความ · ปุ่ม ⋯ บนหัวห้อง: ลบแชทฝั่งฉัน / ออกจากกลุ่ม
 // ฟีเจอร์แชท (2026-11-17): อ่านแล้ว (แบบ LINE) · รีแอคชัน 6 แบบ · คัดลอก · ส่งต่อ (ขึ้นชื่อต้นฉบับ) · 🔍 ค้นหาในห้อง
 //   กดค้าง/คลิกขวาที่ข้อความ = เปิดเมนูข้อความ
+// ชุด 2 (2026-11-17): วิดีโอ (50MB) · อัลบั้ม (เลือกหลายรูป/วิดีโอ = ตารางในบับเบิลเดียว) · 📊 โพล · ปักหมุด/ประกาศ 5 อัน
+//   · "กำลังพิมพ์…" · ลิงก์ในข้อความ + ตัวอย่างลิงก์ (ใน MessageContent)
 // =====================================================================
 
 import { FormEvent, KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { thaiClock, thaiDate } from '../../shared/time';
-import { MAX_MESSAGE_CHARS, REACTIONS } from '../../shared/protocol';
+import { nowThai, thaiAfter, thaiClock, thaiDate, thaiShort } from '../../shared/time';
+import { ALBUM_MAX, MAX_MESSAGE_CHARS, POLL_MAX_OPTIONS, POLL_OPTION_MAX, POLL_QUESTION_MAX, REACTIONS } from '../../shared/protocol';
 import StickerPicker from '../StickerPicker';
-import { ChatMessage, FormInfo, Room, RoomMember, User, api, errMsg, stickerUrl } from '../api';
+import { ChatMessage, FormInfo, Room, RoomMember, RoomPin, User, api, errMsg, stickerUrl } from '../api';
 import type { MessageExtra, ReactionGroup, ReadState, ReplyRef } from '../../shared/protocol';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
@@ -24,7 +26,7 @@ import { OutgoingFile, useRoomSocket } from '../useRoomSocket';
 import MessageContent from '../MessageContent';
 import VoiceRecorder from '../VoiceRecorder';
 import InvitePanel from '../InvitePanel';
-import { formatSize, prepareImage } from '../media';
+import { formatDuration, formatSize, prepareImage, prepareVideo } from '../media';
 
 export default function ChatRoomPage() {
   const { id = '' } = useParams();
@@ -57,6 +59,9 @@ export default function ChatRoomPage() {
   const [readersFor, setReadersFor] = useState<ReadState[] | null>(null);
   const [reactionsFor, setReactionsFor] = useState<ChatMessage | null>(null);
   const pressTimer = useRef<number | undefined>(undefined);
+  // ---------- ชุด 2 ----------
+  const [showPoll, setShowPoll] = useState(false);
+  const [showPins, setShowPins] = useState(false);
 
   const loadRoom = useCallback(async () => {
     try {
@@ -117,24 +122,36 @@ export default function ChatRoomPage() {
     stickBottom.current = true;
   }
 
-  function queueFile(f: OutgoingFile) {
-    const err = s.sendFile(f, text, outExtra());
+  function queueFile(f: OutgoingFile, more?: MessageExtra) {
+    const base = outExtra();
+    const extra = more?.albumId ? { ...(base ?? {}), albumId: more.albumId } : base;
+    const err = s.sendFile(f, text, extra);
     if (err) { notify('error', `${f.name}: ${err}`); return; }
     setText(''); // ข้อความในช่องพิมพ์กลายเป็นคำบรรยายใต้ไฟล์
     setReplyTo(null);
     stickBottom.current = true;
   }
 
-  // ---------- รูป: ย่อก่อนส่ง ----------
+  // ---------- รูป (ย่อก่อนส่ง) / วิดีโอ (ไม่ย่อ 50MB) — เลือกหลายไฟล์ = อัลบั้ม (ละ 20 ไฟล์) ----------
   async function onPickImages(files: FileList | null) {
     if (!files?.length) return;
     setPreparing(true);
-    for (const file of Array.from(files)) {
+    const list = Array.from(files);
+    if (list.length > ALBUM_MAX) notify('warning', `เลือกไว้ ${list.length} ไฟล์ — จะแบ่งเป็นอัลบั้มละ ${ALBUM_MAX} ไฟล์`);
+    let albumId: string | undefined;
+    for (const [i, file] of list.entries()) {
+      if (list.length > 1 && i % ALBUM_MAX === 0) albumId = makeAlbumId();
+      const album = list.length > 1 ? { albumId } : {};
       try {
-        const img = await prepareImage(file);
-        queueFile({ kind: 'image', blob: img.blob, name: img.name, mime: img.mime, width: img.width, height: img.height });
+        if ((file.type || '').startsWith('video/') || /\.(mov|mp4|webm|3gp)$/i.test(file.name)) {
+          const v = await prepareVideo(file);
+          queueFile({ kind: 'video', blob: v.blob, name: v.name, mime: v.mime, width: v.width, height: v.height, durationMs: v.durationMs }, album);
+        } else {
+          const img = await prepareImage(file);
+          queueFile({ kind: 'image', blob: img.blob, name: img.name, mime: img.mime, width: img.width, height: img.height }, album);
+        }
       } catch (e) {
-        notify('error', `${file.name}: ${e instanceof Error ? e.message : 'เตรียมรูปไม่สำเร็จ'}`);
+        notify('error', `${file.name}: ${e instanceof Error ? e.message : 'เตรียมไฟล์ไม่สำเร็จ'}`);
       }
     }
     setPreparing(false);
@@ -198,14 +215,27 @@ export default function ChatRoomPage() {
 
   // ---------- ปักหมุด: แชท 1:1 ทั้งสองคน · กลุ่ม/ชาเนล เฉพาะเจ้าของ/แอดมินห้อง ----------
   const canPin = !!room && (room.type === 'dm' || room.myRole === 'owner' || room.myRole === 'admin');
-  async function pin(seq: number | null, notifyAll = false) {
+  // ปักหมุด/ประกาศ: ได้สูงสุด 5 ข้อความ (ผู้ใช้เลือก) — เซิร์ฟเวอร์ตรวจจำนวนซ้ำ
+  const pins = room?.pins ?? [];
+  async function pin(seq: number, notifyAll = false) {
     if (!room) return;
     try {
-      await api.post(`/api/rooms/${encodeURIComponent(room.id)}/pin`, { seq, notify: notifyAll });
-      notify('success', seq === null ? 'เลิกปักหมุดแล้ว' : notifyAll ? 'ปักหมุดและแจ้งทุกคนแล้ว' : 'ปักหมุดแล้ว');
+      const r = await api.post<{ warnings: string[] }>(`/api/rooms/${encodeURIComponent(room.id)}/pin`, { seq, notify: notifyAll });
+      notify('success', notifyAll ? 'ปักหมุดและประกาศให้ทุกคนแล้ว' : 'ปักหมุดแล้ว');
+      for (const w of r.warnings ?? []) notify('warning', w);
       void loadRoom();
     } catch (e) {
-      notify('error', `${seq === null ? 'เลิกปักหมุด' : 'ปักหมุด'}ไม่สำเร็จ: ${errMsg(e)}`);
+      notify('error', `ปักหมุดไม่สำเร็จ: ${errMsg(e)}`);
+    }
+  }
+  async function unpin(seq: number) {
+    if (!room) return;
+    try {
+      await api.post(`/api/rooms/${encodeURIComponent(room.id)}/unpin`, { seq });
+      notify('success', 'เลิกปักหมุดแล้ว');
+      void loadRoom();
+    } catch (e) {
+      notify('error', `เลิกปักหมุดไม่สำเร็จ: ${errMsg(e)}`);
     }
   }
   // ---------- ลบข้อความ: ยกเลิกส่ง (ของตัวเอง 24 ชม.) / แอดมินห้องลบ ----------
@@ -285,19 +315,66 @@ export default function ChatRoomPage() {
         )}
       />
       {connText && <div className={`banner ${s.conn === 'failed' ? 'banner-error' : 'banner-warning'}`} role="status">{connText}</div>}
-      {room?.pinned && (
+      {pins.length > 0 && (
         <div className="pinned-bar">
-          <button className="pinned-main" onClick={() => void jumpTo(room.pinned!.seq)}>
-            <span className="small muted">📌 ข้อความที่ปักหมุด{room.pinned.sender ? ` · ${room.pinned.sender}` : ''}</span>
-            <span className="pinned-text">{room.pinned.text}</span>
+          <button className="pinned-main" onClick={() => void jumpTo(pins[0].seq)}>
+            <span className="small muted">📌 ประกาศ{pins[0].sender ? ` · ${pins[0].sender}` : ''}</span>
+            <span className="pinned-text">{pins[0].text}</span>
           </button>
-          {canPin && <button className="link" onClick={() => void pin(null)} aria-label="เลิกปักหมุด">✕</button>}
+          <button className="link" onClick={() => setShowPins(true)} aria-label="ดูประกาศทั้งหมด">
+            {pins.length > 1 ? `ทั้งหมด ${pins.length}` : 'จัดการ'}
+          </button>
         </div>
       )}
 
       <div className="messages" ref={listRef} onScroll={onScroll}>
         {s.loadingOlder && <p className="center muted small">กำลังโหลดข้อความเก่า…</p>}
-        {s.messages.map((m) => {
+        {groupAlbums(s.messages).map((item) => {
+          if (item.album) {
+            const ms = item.album;
+            const first = ms[0], last = ms[ms.length - 1];
+            const d = thaiDate(first.createdAt);
+            const showDate = d !== lastDate;
+            lastDate = d;
+            const mine = first.senderId === me.user.id;
+            const readers = (isChannel ? isRoomAdmin : mine) ? readersOf(last) : [];
+            return (
+              <div key={`album-${first.seq}`}>
+                {showDate && <div className="date-sep">{d}</div>}
+                <div className={`bubble-row ${mine ? 'mine' : ''}`}>
+                  <div className="bubble bubble-album">
+                    {!mine && isGroup && <div className="bubble-name">{first.senderName}</div>}
+                    {first.extra?.forwardedFrom && <div className="forwarded">↪️ ส่งต่อจาก {first.extra.forwardedFrom}</div>}
+                    <div className={`album-grid n${Math.min(ms.length, 4)}`}>
+                      {ms.map((m) => (
+                        <div key={m.seq} id={`msg-${m.seq}`} className="album-tile"
+                          onContextMenu={(e) => { e.preventDefault(); setMenuFor(m); }}
+                          onTouchStart={() => pressStart(m)} onTouchEnd={pressEnd} onTouchMove={pressEnd}>
+                          <AlbumTile m={m} />
+                          {!!m.reactions?.length && (
+                            <button className="album-react" onClick={() => setReactionsFor(m)} aria-label="ดูว่าใครกดรีแอคชัน">
+                              {m.reactions[0].emoji} {m.reactions.reduce((n, g) => n + g.users.length, 0)}
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    {ms.filter((m) => m.body).map((m) => <div key={m.seq} className="bubble-body">{m.body}</div>)}
+                    <div className="bubble-meta">
+                      {readers.length > 0 && (
+                        room?.type === 'dm' ? <span className="read-mark">อ่านแล้ว </span>
+                        : isChannel ? <span className="read-mark">👁 {readers.length} </span>
+                        : <button className="read-mark link" onClick={() => setReadersFor(readers)}>อ่านแล้ว {readers.length} </button>
+                      )}
+                      {ms.length} รายการ · {thaiClock(last.createdAt)}
+                      <button className="bubble-more" onClick={() => setMenuFor(last)} aria-label="ตัวเลือก (รูปสุดท้าย) — กดค้างที่รูปเพื่อเลือกรูปนั้น">⋯</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          }
+          const m = item.one;
           const d = thaiDate(m.createdAt);
           const showDate = d !== lastDate;
           lastDate = d;
@@ -326,7 +403,10 @@ export default function ChatRoomPage() {
                       <span>{m.extra.replyTo.snippet ?? ''}</span>
                     </button>
                   )}
-                  {!m.deleted && <MessageContent m={m} roomId={id} />}
+                  {!m.deleted && (m.kind === 'poll'
+                    ? <PollCard m={m} meId={me.user.id} canClose={m.poll?.createdBy === me.user.id || isRoomAdmin}
+                        onVote={(opts) => s.vote(m.seq, opts)} onClose={() => { if (confirm('ปิดโหวตโพลนี้เลยไหม? ปิดแล้วเปิดใหม่ไม่ได้')) s.closePoll(m.seq); }} />
+                    : <MessageContent m={m} roomId={id} />)}
                   {!m.deleted && !!m.reactions?.length && (
                     <button className="reaction-chips" onClick={() => setReactionsFor(m)} aria-label="ดูว่าใครกดรีแอคชัน">
                       {m.reactions.map((g) => (
@@ -356,8 +436,10 @@ export default function ChatRoomPage() {
               {p.kind === 'form' && <div className="small">📝 การ์ดฟอร์ม: {p.extra?.formTitle}</div>}
               {p.kind === 'sticker' && p.extra?.stickerId && <img className="sticker-img" src={stickerUrl(p.extra.stickerId)} alt="สติกเกอร์" />}
               {p.file && p.kind !== 'image' && (
-                <div className="small">{p.kind === 'voice' ? '🎤 ข้อความเสียง' : `📄 ${p.file.name}`} · {formatSize(p.file.blob.size)}</div>
+                <div className="small">{p.kind === 'voice' ? '🎤 ข้อความเสียง' : p.kind === 'video' ? `🎬 ${p.file.name}` : `📄 ${p.file.name}`} · {formatSize(p.file.blob.size)}</div>
               )}
+              {p.kind === 'poll' && <div className="small">📊 โพล: {p.extra?.pollCreate?.options.length ?? 0} ตัวเลือก</div>}
+              {p.extra?.albumId && <div className="small muted">อัลบั้ม</div>}
               {p.body && <div className="bubble-body">{p.body}</div>}
               {p.status === 'uploading' ? (
                 <div className="bubble-meta">
@@ -378,6 +460,11 @@ export default function ChatRoomPage() {
         ))}
       </div>
 
+      {s.typing.size > 0 && (
+        <div className="typing-line small muted" aria-live="polite">
+          {[...s.typing.values()].map((t) => t.name).slice(0, 3).join(', ')}{s.typing.size > 3 ? ` และอีก ${s.typing.size - 3} คน` : ''} กำลังพิมพ์…
+        </div>
+      )}
       {room && !room.canPost ? (
         <div className="readonly-note">📢 ชาเนลนี้โพสต์ได้เฉพาะเจ้าของและแอดมินชาเนล</div>
       ) : (
@@ -418,10 +505,13 @@ export default function ChatRoomPage() {
         ) : (
         <>
         <div className="composer-tools">
-          <button type="button" className="tool" onClick={() => imageInput.current?.click()} disabled={s.conn === 'failed'}>🖼 รูป</button>
+          <button type="button" className="tool" onClick={() => imageInput.current?.click()} disabled={s.conn === 'failed'}>🖼 รูป/วิดีโอ</button>
           <button type="button" className="tool" onClick={() => fileInput.current?.click()} disabled={s.conn === 'failed'}>📎 ส่งเป็นไฟล์</button>
           <button type="button" className="tool" onClick={() => setRecording(true)} disabled={s.conn === 'failed'}>🎤 เสียง</button>
           <button type="button" className={`tool ${showStickers ? 'tool-on' : ''}`} onClick={() => setShowStickers((v) => !v)} disabled={s.conn === 'failed'} aria-pressed={showStickers}>😺 สติกเกอร์</button>
+          {hasMembers && (
+            <button type="button" className="tool" onClick={() => setShowPoll(true)} disabled={s.conn === 'failed'}>📊 โพล</button>
+          )}
           {me.user.role === 'admin' && (
             <button type="button" className="tool" onClick={() => void openFormPicker()} disabled={s.conn === 'failed'}>📝 ฟอร์ม</button>
           )}
@@ -434,13 +524,13 @@ export default function ChatRoomPage() {
           >
             {silent ? '🔕 เงียบอยู่' : '🔕 ส่งเงียบ'}
           </button>
-          <input ref={imageInput} type="file" accept="image/*" multiple hidden onChange={(e) => void onPickImages(e.target.files)} />
+          <input ref={imageInput} type="file" accept="image/*,video/*" multiple hidden onChange={(e) => void onPickImages(e.target.files)} />
           <input ref={fileInput} type="file" multiple hidden onChange={(e) => onPickFiles(e.target.files)} />
         </div>
         <div className="composer-row">
           <textarea
             value={text}
-            onChange={(e) => { setText(e.target.value); if (inputError) setInputError(''); }}
+            onChange={(e) => { setText(e.target.value); if (inputError) setInputError(''); if (e.target.value.trim()) s.sendTyping(); }}
             onKeyDown={onKey}
             rows={1}
             maxLength={MAX_MESSAGE_CHARS}
@@ -470,7 +560,7 @@ export default function ChatRoomPage() {
           m={menuFor}
           canReply={!!room?.canPost}
           canPin={canPin}
-          isPinned={room?.pinned?.seq === menuFor.seq}
+          isPinned={pins.some((p) => p.seq === menuFor.seq)}
           canUnsend={menuFor.senderId === me.user.id && Date.now() - Date.parse(menuFor.createdAt) <= UNSEND_MS}
           canModerate={!!room && room.type !== 'dm' && (room.myRole === 'owner' || room.myRole === 'admin')}
           onDelete={(asAdmin) => { const m = menuFor; setMenuFor(null); void deleteMsg(m, asAdmin); }}
@@ -480,7 +570,7 @@ export default function ChatRoomPage() {
             setMenuFor(null);
           }}
           onPin={(notifyAll) => { void pin(menuFor.seq, notifyAll); setMenuFor(null); }}
-          onUnpin={() => { void pin(null); setMenuFor(null); }}
+          onUnpin={() => { void unpin(menuFor.seq); setMenuFor(null); }}
           onCopy={async () => {
             setMenuFor(null);
             if (await copyText(menuFor.body)) notify('success', 'คัดลอกข้อความแล้ว');
@@ -489,11 +579,23 @@ export default function ChatRoomPage() {
           myReaction={menuFor.reactions?.find((g) => g.users.some((u) => u.id === me.user.id))?.emoji ?? null}
           canReact={s.conn === 'open'}
           onReact={(emoji) => { s.react(menuFor.seq, emoji); setMenuFor(null); }}
-          canForward={menuFor.kind !== 'form' || me.user.role === 'admin'}
+          canForward={menuFor.kind !== 'poll' && (menuFor.kind !== 'form' || me.user.role === 'admin')}
           onForward={() => { setForwardFor(menuFor); setMenuFor(null); }}
         />
       )}
 
+      {showPoll && (
+        <PollSheet onClose={() => setShowPoll(false)} onSend={(q, poll) => {
+          s.sendPoll(q, poll, outExtra());
+          setReplyTo(null);
+          setShowPoll(false);
+          stickBottom.current = true;
+        }} />
+      )}
+      {showPins && (
+        <PinsSheet pins={pins} canPin={canPin} onClose={() => setShowPins(false)}
+          onJump={(seq) => { setShowPins(false); void jumpTo(seq); }} onUnpin={(seq) => void unpin(seq)} />
+      )}
       {showSearch && (
         <SearchSheet roomId={id} onClose={() => setShowSearch(false)} onPick={(seq) => { setShowSearch(false); void jumpTo(seq); }} />
       )}
@@ -538,6 +640,8 @@ function previewText(m: ChatMessage): string {
   if (m.kind === 'file') return `[ไฟล์] ${m.file?.name ?? ''}`;
   if (m.kind === 'form') return `[ฟอร์ม] ${m.extra?.formTitle ?? ''}`;
   if (m.kind === 'sticker') return '[สติกเกอร์]';
+  if (m.kind === 'video') return '[วิดีโอ]';
+  if (m.kind === 'poll') return `[โพล] ${m.body}`;
   return '';
 }
 
@@ -570,7 +674,7 @@ function MessageMenu({
         {canPin && !isPinned && (
           <>
             <button className="btn btn-ghost btn-block" onClick={() => onPin(false)}>📌 ปักหมุด (ไม่แจ้งใคร)</button>
-            <button className="btn btn-ghost btn-block" onClick={() => onPin(true)}>📌 ปักหมุด + แจ้งทุกคนในห้อง</button>
+            <button className="btn btn-ghost btn-block" onClick={() => onPin(true)}>📢 ประกาศ (ปักหมุด + แจ้งทุกคนในห้อง)</button>
           </>
         )}
         {canPin && isPinned && <button className="btn btn-ghost btn-block" onClick={onUnpin}>เลิกปักหมุด</button>}
@@ -1064,6 +1168,166 @@ function ReactionsSheet({ groups, meId, onRemoveMine, onClose }: {
           {groups.flatMap((g) => g.users.map((u) => <li key={`${g.emoji}-${u.id}`}>{g.emoji} {u.name}{u.id === meId ? ' (คุณ)' : ''}</li>))}
         </ul>
         {mine && <button className="btn btn-ghost btn-block" onClick={onRemoveMine}>เอารีแอคชันของฉันออก</button>}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
+// ชุด 2 (2026-11-17): อัลบั้ม · โพล · ประกาศ
+// ---------------------------------------------------------------------
+function makeAlbumId() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(10)), (x) => x.toString(16).padStart(2, '0')).join('');
+}
+
+/** รวมรูป/วิดีโอที่ส่งพร้อมกัน (albumId เดียวกัน + คนส่งคนเดียวกัน + อยู่ติดกัน) เป็นอัลบั้ม */
+function groupAlbums(msgs: ChatMessage[]): ({ one: ChatMessage; album?: undefined } | { album: ChatMessage[]; one?: undefined })[] {
+  const out: ({ one: ChatMessage; album?: undefined } | { album: ChatMessage[]; one?: undefined })[] = [];
+  for (const m of msgs) {
+    const aid = m.deleted ? undefined : m.extra?.albumId;
+    const prev = out[out.length - 1];
+    if (aid && prev?.album && prev.album[0].extra?.albumId === aid && prev.album[0].senderId === m.senderId) {
+      prev.album.push(m);
+    } else if (aid) {
+      out.push({ album: [m] });
+    } else {
+      out.push({ one: m });
+    }
+  }
+  return out.map((x) => (x.album && x.album.length === 1 ? { one: x.album[0] } : x));
+}
+
+function AlbumTile({ m }: { m: ChatMessage }) {
+  const [broken, setBroken] = useState(false);
+  const f = m.file;
+  if (!f) return <div className="album-missing small muted">ไม่มีไฟล์</div>;
+  const url = `/api/files/${encodeURIComponent(f.id)}`;
+  if (f.expiresAt && f.expiresAt < nowThai()) return <div className="album-missing small muted">หมดอายุ</div>;
+  if (broken) return <a className="album-missing small" href={url} download={f.name}>เปิดไม่ได้ — ดาวน์โหลด</a>;
+  if (m.kind === 'video') {
+    return (
+      <div className="album-video">
+        <video src={`${url}#t=0.1`} preload="metadata" controls playsInline onError={() => setBroken(true)} />
+        {f.durationMs ? <span className="album-dur">{formatDuration(f.durationMs)}</span> : null}
+      </div>
+    );
+  }
+  return (
+    <a href={url} target="_blank" rel="noreferrer">
+      <img src={url} alt={f.name} loading="lazy" onError={() => setBroken(true)} />
+    </a>
+  );
+}
+
+function PollCard({ m, meId, canClose, onVote, onClose }: {
+  m: ChatMessage; meId: string; canClose: boolean; onVote: (options: number[]) => void; onClose: () => void;
+}) {
+  const [showNames, setShowNames] = useState(false);
+  const p = m.poll;
+  if (!p) return <div className="small error-text">อ่านข้อมูลโพลไม่ได้ — ลองเปิดห้องใหม่</div>;
+  const closed = !!p.closedAt || (!!p.closesAt && p.closesAt <= nowThai());
+  const mine = p.options.map((o, i) => (o.voters.some((v) => v.id === meId) ? i : -1)).filter((i) => i >= 0);
+  const voters = new Set(p.options.flatMap((o) => o.voters.map((v) => v.id))).size;
+  function tap(i: number) {
+    if (closed) return;
+    if (p!.multi) onVote(mine.includes(i) ? mine.filter((x) => x !== i) : [...mine, i]);
+    else onVote(mine.includes(i) ? [] : [i]);
+  }
+  return (
+    <div className="poll-card">
+      <div className="small muted">📊 โพล · {p.multi ? 'เลือกได้หลายข้อ' : 'เลือกได้ 1 ข้อ'}</div>
+      <b className="poll-q">{m.body}</b>
+      {p.options.map((o, i) => {
+        const pct = voters ? Math.round((o.voters.length / voters) * 100) : 0;
+        return (
+          <div key={i}>
+            <button className={`poll-opt ${mine.includes(i) ? 'on' : ''}`} onClick={() => tap(i)} disabled={closed} aria-pressed={mine.includes(i)}>
+              <span className="poll-bar" style={{ width: `${pct}%` }} />
+              <span className="poll-label">{mine.includes(i) ? '✓ ' : ''}{o.text}</span>
+              <span className="poll-count">{o.voters.length}</span>
+            </button>
+            {showNames && o.voters.length > 0 && <div className="small muted poll-names">{o.voters.map((v) => v.name).join(', ')}</div>}
+          </div>
+        );
+      })}
+      <div className="small muted">
+        {voters} คนโหวต ·{' '}
+        {closed ? `ปิดโหวตแล้ว${p.closedAt ? ` (${thaiShort(p.closedAt)})` : ''}` : p.closesAt ? `ปิดโหวต ${thaiShort(p.closesAt)}` : 'ไม่มีกำหนดปิด'}
+        {!closed && ' · แตะอีกครั้งเพื่อเปลี่ยน/ถอนโหวต'}
+      </div>
+      <div className="poll-actions">
+        {voters > 0 && <button className="link small" onClick={() => setShowNames((v) => !v)}>{showNames ? 'ซ่อนรายชื่อ' : 'ดูว่าใครโหวต'}</button>}
+        {canClose && !closed && <button className="link small danger-text" onClick={onClose}>ปิดโหวต</button>}
+      </div>
+    </div>
+  );
+}
+
+const POLL_CLOSE_OPTIONS: { key: string; label: string; ms: number | null }[] = [
+  { key: 'none', label: 'ไม่กำหนด', ms: null }, { key: '1h', label: '1 ชั่วโมง', ms: 3600_000 },
+  { key: '1d', label: '1 วัน', ms: 86400_000 }, { key: '3d', label: '3 วัน', ms: 3 * 86400_000 }, { key: '7d', label: '7 วัน', ms: 7 * 86400_000 },
+];
+
+function PollSheet({ onClose, onSend }: { onClose: () => void; onSend: (q: string, poll: { options: string[]; multi: boolean; closesAt: string | null }) => void }) {
+  const [q, setQ] = useState('');
+  const [opts, setOpts] = useState(['', '']);
+  const [multi, setMulti] = useState(false);
+  const [closeKey, setCloseKey] = useState('none');
+  const [error, setError] = useState('');
+  function submit() {
+    const options = opts.map((o) => o.trim()).filter(Boolean);
+    if (!q.trim()) return setError('พิมพ์คำถามก่อน');
+    if (options.length < 2) return setError('ต้องมีตัวเลือกอย่างน้อย 2 ข้อ');
+    if (new Set(options.map((o) => o.toLowerCase())).size !== options.length) return setError('มีตัวเลือกซ้ำกัน');
+    const ms = POLL_CLOSE_OPTIONS.find((o) => o.key === closeKey)?.ms ?? null;
+    onSend(q, { options, multi, closesAt: ms ? thaiAfter(ms) : null });
+  }
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head"><b>📊 สร้างโพล</b><button className="link" onClick={onClose}>ปิด</button></div>
+        <input value={q} onChange={(e) => { setQ(e.target.value); setError(''); }} maxLength={POLL_QUESTION_MAX} placeholder="คำถาม" autoFocus />
+        {opts.map((o, i) => (
+          <div key={i} className="poll-edit-row">
+            <input value={o} maxLength={POLL_OPTION_MAX} placeholder={`ตัวเลือกที่ ${i + 1}`}
+              onChange={(e) => { setOpts((xs) => xs.map((x, k) => (k === i ? e.target.value : x))); setError(''); }} />
+            {opts.length > 2 && <button className="link" onClick={() => setOpts((xs) => xs.filter((_, k) => k !== i))} aria-label="ลบตัวเลือกนี้">✕</button>}
+          </div>
+        ))}
+        {opts.length < POLL_MAX_OPTIONS && <button className="btn btn-ghost btn-small" onClick={() => setOpts((xs) => [...xs, ''])}>+ เพิ่มตัวเลือก</button>}
+        <label className="row-check"><input type="checkbox" checked={multi} onChange={(e) => setMulti(e.target.checked)} /> เลือกได้หลายข้อ</label>
+        <label className="small">ปิดโหวตอัตโนมัติ
+          <select value={closeKey} onChange={(e) => setCloseKey(e.target.value)}>
+            {POLL_CLOSE_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+          </select>
+        </label>
+        <p className="small muted">ทุกคนในห้องเห็นว่าใครโหวตอะไร · เปลี่ยนคำตอบได้จนกว่าโพลจะปิด</p>
+        {error && <p className="error-text small">{error}</p>}
+        <button className="btn btn-block" onClick={submit}>ส่งโพล</button>
+      </div>
+    </div>
+  );
+}
+
+function PinsSheet({ pins, canPin, onClose, onJump, onUnpin }: {
+  pins: RoomPin[]; canPin: boolean; onClose: () => void; onJump: (seq: number) => void; onUnpin: (seq: number) => void;
+}) {
+  return (
+    <div className="sheet-backdrop" onClick={onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head"><b>📌 ประกาศ / ปักหมุด ({pins.length}/5)</b><button className="link" onClick={onClose}>ปิด</button></div>
+        <ul className="search-results">
+          {pins.map((p) => (
+            <li key={p.seq} className="pin-item">
+              <button onClick={() => onJump(p.seq)}>
+                <span className="small muted">{p.sender ?? ''} · ปักเมื่อ {thaiShort(p.at)}</span>
+                <span>{p.text}</span>
+              </button>
+              {canPin && <button className="link small danger-text" onClick={() => onUnpin(p.seq)}>เลิกปัก</button>}
+            </li>
+          ))}
+        </ul>
+        {!canPin && <p className="small muted">เลิกปักหมุดได้เฉพาะเจ้าของ/แอดมินห้อง</p>}
       </div>
     </div>
   );
