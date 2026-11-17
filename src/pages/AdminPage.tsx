@@ -29,7 +29,14 @@ export default function AdminPage() {
       setError(`โหลดรายชื่อไม่สำเร็จ: ${errMsg(e)}`);
     }
   }, []);
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    void load();
+    // มีคนสมัครใหม่ระหว่างเปิดหน้านี้ (แจ้งแอดมิน 2026-11-17) → โหลดรายชื่อใหม่
+    const onAdmin = () => void load();
+    window.addEventListener('admin-activity', onAdmin);
+    return () => window.removeEventListener('admin-activity', onAdmin);
+  }, [load]);
+  const pendingN = users?.filter((u) => u.status === 'pending').length ?? 0;
 
   async function setStatus(u: AdminUser, status: User['status']) {
     setBusyId(u.id);
@@ -55,6 +62,7 @@ export default function AdminPage() {
       </div>
       {error && <div className="banner banner-error" role="alert">{error}</div>}
       {users === null && !error && <Loading variant="list" />}
+      {pendingN > 0 && <div className="banner banner-warning">🆕 รออนุมัติ {pendingN} คน (อยู่บนสุดของรายการ)</div>}
       <ul className="user-list">
         {users?.map((u) => (
           <li key={u.id} className="user-item admin-user">

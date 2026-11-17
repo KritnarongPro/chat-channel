@@ -7,7 +7,7 @@
 // =====================================================================
 
 import { DurableObject } from 'cloudflare:workers';
-import type { ActivityFrame } from '../shared/protocol';
+import type { ActivityFrame, AdminFrame } from '../shared/protocol';
 import type { Env } from './lib';
 
 interface HubSocket { visible: boolean }
@@ -25,9 +25,9 @@ export class UserHub extends DurableObject<Env> {
     }
 
     if (url.pathname === '/deliver' && req.method === 'POST') {
-      let frame: ActivityFrame;
+      let frame: ActivityFrame | AdminFrame;
       try {
-        frame = (await req.json()) as ActivityFrame;
+        frame = (await req.json()) as ActivityFrame | AdminFrame;
       } catch {
         return Response.json({ ok: false, error: { code: 'BAD_JSON', message: 'ข้อมูลไม่ใช่ JSON' } }, { status: 400 });
       }

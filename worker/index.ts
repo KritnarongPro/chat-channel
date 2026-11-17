@@ -71,6 +71,7 @@ const routes: Route[] = [
 
   // ---------- admin: อนุมัติ/ระงับผู้ใช้ ----------
   { method: 'GET',  pattern: '/api/admin/users',              need: 'admin',  handler: adminListUsers },
+  { method: 'GET',  pattern: '/api/admin/pending-count',      need: 'admin',  handler: adminPendingCount },  // ตัวเลขรออนุมัติบนเมนู ☰
   { method: 'POST', pattern: '/api/admin/users/:id/status',   need: 'admin',  handler: adminSetStatus },
 
   // ---------- users: รายชื่อสำหรับเริ่มแชท ----------
@@ -269,6 +270,13 @@ async function logout(c: Ctx) {
     await db('ออกจากระบบ', () => c.env.DB.prepare('DELETE FROM sessions WHERE token_hash = ?').bind(hash).run());
   }
   return ok({ loggedOut: true }, 200, { 'Set-Cookie': clearSessionCookie });
+}
+
+/** จำนวนคนรออนุมัติ (ไม่นับบอท) — แสดงเป็นตัวเลขบนเมนู ☰ ของแอดมิน */
+async function adminPendingCount(c: Ctx) {
+  const r = await db('นับคนรออนุมัติ', () =>
+    c.env.DB.prepare(`SELECT COUNT(*) AS n FROM users WHERE status = 'pending' AND is_bot = 0`).first<{ n: number }>());
+  return ok({ pending: r?.n ?? 0 });
 }
 
 async function me(c: Ctx) {

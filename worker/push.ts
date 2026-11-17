@@ -205,13 +205,32 @@ export interface PushJobMessage {
   silent?: boolean;                             // ส่งแบบเงียบ → ไม่เด้ง (แต่อัปเดตตัวเลข/รายการแชทในแอป)
   important?: string[];                         // คนที่ถูก @ชื่อ หรือถูกตอบกลับ
 }
-export type PushJob = PushJobMessage | { type: 'webhook'; botId: string; update: Record<string, unknown> };
+/** แจ้งแอดมินระบบเมื่อมีคนสมัคร (ผู้ใช้เลือก 2026-11-17: แจ้งทั้งรออนุมัติ และเข้าผ่านลิงก์เชิญ) */
+export interface AdminSignupJob {
+  type: 'admin-signup';
+  userId: string;
+  name: string;
+  email: string;
+  via: 'signup' | 'invite' | 'invite-failed';
+  roomTitle?: string;
+}
+export type PushJob = PushJobMessage | AdminSignupJob | { type: 'webhook'; botId: string; update: Record<string, unknown> };
 
 export async function handlePushQueue(batch: MessageBatch<PushJob>, env: Env) {
   for (const msg of batch.messages) {
     if (msg.body.type === 'webhook') {
       const r = await deliverWebhook(env, msg.body.botId, msg.body.update);
       if (r === 'retry') msg.retry(); else msg.ack();
+      continue;
+    }
+    if (msg.body.type === 'admin-signup') {
+      try {
+        await notifyAdminsSignup(env, msg.body);
+        msg.ack();
+      } catch (err) {
+        console.error('แจ้งแอดมินเรื่องคนสมัครใหม่ไม่สำเร็จ จะลองใหม่', err);
+        msg.retry();
+      }
       continue;
     }
     try {
@@ -334,4 +353,48 @@ export async function notifyUsers(env: Env, job: PushJobMessage): Promise<{ sent
   }
   if (pushTo.length === 0) return { sent: 0, failed: 0, errors: [] };
   return sendToUsers(env, pushTo, (uid) => perUser.get(uid) ?? job.payload);
+}
+
+// =====================================================================
+// 7. แจ้งแอดมินระบบ: มีคนสมัครใหม่ (2026-11-17)
+//    แอปเปิดอยู่บนจอ → แบนเนอร์ในแอป (UserHub) · ไม่อย่างนั้น → แจ้งเตือนมือถือ · แตะแล้วไปหน้า แอดมิน
+//    ไม่ใช้ตั้งค่าปิดเสียงของห้อง (ไม่ใช่ข้อความในห้อง) · เมนู ☰ มีตัวเลขคนรออนุมัติอีกชั้น เผื่อแจ้งเตือนไม่ถึง
+// =====================================================================
+export async function notifyAdminsSignup(env: Env, job: AdminSignupJob) {
+  const admins = await env.DB.prepare(
+    `SELECT id FROM users WHERE role = 'admin' AND status = 'active' AND is_bot = 0 AND id <> ?`,
+  ).bind(job.userId).all<{ id: string }>();
+  if (admins.results.length === 0) return;
+  const who = `${job.name}${job.email ? ` (${job.email})` : ''}`;
+  const title = job.via === 'invite' ? '🔗 มีคนเข้าระบบผ่านลิงก์เชิญ' : '🆕 มีคนสมัครใหม่ รออนุมัติ';
+  const body = job.via === 'invite'
+    ? `${who} เข้าห้อง ${job.roomTitle ?? ''} แล้ว (อนุมัติอัตโนมัติ)`
+    : job.via === 'invite-failed'
+      ? `${who} — มาจากลิงก์เชิญที่ใช้ไม่ได้แล้ว จึงรออนุมัติ`
+      : `${who} — แตะเพื่ออนุมัติ`;
+  const url = '/admin';
+  const pushTo: string[] = [];
+  for (const a of admins.results) {
+    let visible = false;
+    try {
+      const res = await env.HUB.get(env.HUB.idFromName(a.id)).fetch(new Request('https://hub/deliver', {
+        method: 'POST', body: JSON.stringify({ type: 'admin', title, body, url }),
+      }));
+      visible = !!((await res.json()) as { data?: { visible: boolean } }).data?.visible;
+    } catch (err) {
+      console.error('ส่งแจ้งแอดมินถึงแอปไม่สำเร็จ — จะส่งแจ้งเตือนมือถือแทน', a.id, err);
+    }
+    if (!visible) pushTo.push(a.id);
+  }
+  const r = await sendToUsers(env, pushTo, { title, body, url, tag: `admin-signup-${job.userId}` });
+  if (r.failed) console.error(`แจ้งแอดมิน: ส่งแจ้งเตือนมือถือไม่สำเร็จ ${r.failed} เครื่อง`, r.errors.slice(0, 5));
+}
+
+/** ใส่งานแจ้งแอดมินลง Queue — ไม่สำเร็จไม่ทำให้การล็อกอินล้ม (แอดมินยังเห็นตัวเลขรออนุมัติในเมนู ☰) */
+export async function queueAdminSignup(env: Env, job: Omit<AdminSignupJob, 'type'>) {
+  try {
+    await env.PUSH_QUEUE.send({ type: 'admin-signup', ...job } satisfies AdminSignupJob);
+  } catch (err) {
+    console.error('ใส่งานแจ้งแอดมิน (คนสมัครใหม่) ลง Queue ไม่สำเร็จ', job.userId, err);
+  }
 }

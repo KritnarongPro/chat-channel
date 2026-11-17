@@ -123,6 +123,7 @@ export async function googleCallback(req: Request, env: Env): Promise<Response> 
   // ---------- ล็อกอิน: หา/สร้างผู้ใช้ ----------
   const now = nowThai();
   let user: { id: string; status: 'pending' | 'active' | 'blocked' };
+  let isNew = false;  // สมัครใหม่ → แจ้งแอดมิน (ใน finishLogin เพราะต้องรู้ผลลิงก์เชิญก่อน)
   try {
     const existing = await env.DB.prepare(`SELECT id, status, line_user_id FROM users WHERE google_sub = ? AND is_bot = 0`)
       .bind(c.sub).first<{ id: string; status: 'pending' | 'active' | 'blocked'; line_user_id: string }>();
@@ -143,12 +144,14 @@ export async function googleCallback(req: Request, env: Env): Promise<Response> 
          VALUES (?, ?, ?, ?, ?, ?, 'pending', 'member', ?, ?)`,
       ).bind(id, `google:${c.sub}`, c.sub, email, (c.name || email.split('@')[0]).slice(0, 80), c.picture ?? null, now, now).run();
       user = { id, status: 'pending' };
+      isNew = true;
     }
   } catch (err) {
     console.error('บันทึกผู้ใช้ Google ลง D1 ไม่สำเร็จ', err);
     return backToApp(env, CLEAR, 'DB_FAILED');
   }
-  return finishLogin(env, CLEAR, user, saved.invite);
+  return finishLogin(env, CLEAR, user, saved.invite,
+    isNew ? { name: (c.name || email.split('@')[0]).slice(0, 80), email } : undefined);
 }
 
 /** ผูก Google กับบัญชีที่ล็อกอินอยู่ — บัญชี Google นี้ผูกกับคนอื่นแล้ว → ไม่รวมบัญชีให้ แจ้งเหตุผล */

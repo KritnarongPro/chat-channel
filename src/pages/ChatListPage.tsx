@@ -21,6 +21,7 @@ export default function ChatListPage() {
   const [rooms, setRooms] = useState<Room[] | null>(null);
   const [error, setError] = useState('');
   const [friendReqs, setFriendReqs] = useState(0);
+  const [pendingUsers, setPendingUsers] = useState(0);  // แอดมิน: คนรออนุมัติ (-1 = โหลดไม่ได้)
   const [menu, setMenu] = useState(false);
 
   const load = useCallback(async () => {
@@ -28,6 +29,11 @@ export default function ChatListPage() {
     api.get<FriendsData>('/api/friends')
       .then((f) => setFriendReqs(f.incoming.length))
       .catch((e) => { console.warn('โหลดคำขอเป็นเพื่อนไม่สำเร็จ', e); setFriendReqs(-1); });
+    if (me.user.role === 'admin') {
+      api.get<{ pending: number }>('/api/admin/pending-count')
+        .then((d) => setPendingUsers(d.pending))
+        .catch((e) => { console.warn('โหลดจำนวนคนรออนุมัติไม่สำเร็จ', e); setPendingUsers(-1); });
+    }
     try {
       const data = await api.get<{ rooms: Room[] }>('/api/rooms');
       setRooms(data.rooms);
@@ -37,7 +43,7 @@ export default function ChatListPage() {
     } catch (e) {
       setError(`โหลดรายการแชทไม่สำเร็จ: ${errMsg(e)}`);
     }
-  }, []);
+  }, [me.user.role]);
 
   useEffect(() => {
     void load();
@@ -46,10 +52,12 @@ export default function ChatListPage() {
     document.addEventListener('visibilitychange', onVis);
     const onActivity = () => void load();
     window.addEventListener('chat-activity', onActivity);
+    window.addEventListener('admin-activity', onActivity);
     return () => {
       clearInterval(t);
       document.removeEventListener('visibilitychange', onVis);
       window.removeEventListener('chat-activity', onActivity);
+      window.removeEventListener('admin-activity', onActivity);
     };
   }, [load]);
 
@@ -64,7 +72,10 @@ export default function ChatListPage() {
               aria-label={friendReqs < 0 ? 'เพื่อน (โหลดคำขอไม่สำเร็จ)' : `เพื่อน${friendReqs ? ` (คำขอ ${friendReqs})` : ''}`}>
               👥{friendReqs !== 0 && <span className="badge">{friendReqs < 0 ? '!' : friendReqs}</span>}
             </Link>
-            <button className="btn btn-small btn-ghost" onClick={() => setMenu(true)} aria-label="เมนู">☰</button>
+            <button className="btn btn-small btn-ghost icon-badge" onClick={() => setMenu(true)}
+              aria-label={pendingUsers > 0 ? `เมนู — มีคนรออนุมัติ ${pendingUsers} คน` : 'เมนู'}>
+              ☰{pendingUsers !== 0 && <span className="badge">{pendingUsers < 0 ? '!' : pendingUsers}</span>}
+            </button>
           </>
         }
       />
@@ -111,7 +122,9 @@ export default function ChatListPage() {
               <li><Link to="/account">👤 บัญชี (Gmail ที่ใช้เข้า)</Link></li>
               <li><Link to="/settings">🔔 ตั้งค่าแจ้งเตือน</Link></li>
               <li><Link to="/orders">📦 ออเดอร์</Link></li>
-              {me.user.role === 'admin' && <li><Link to="/admin">🛠 แอดมิน</Link></li>}
+              {me.user.role === 'admin' && (
+                <li><Link to="/admin">🛠 แอดมิน{pendingUsers > 0 ? ` · รออนุมัติ ${pendingUsers} คน` : pendingUsers < 0 ? ' · (นับคนรออนุมัติไม่ได้)' : ''}</Link></li>
+              )}
               <li><button onClick={() => void logout()}>🚪 ออกจากระบบ</button></li>
             </ul>
           </div>

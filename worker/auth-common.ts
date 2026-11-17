@@ -8,6 +8,7 @@
 
 import { ApiError, Env, createSession } from './lib';
 import { redeemInvite } from './invites';
+import { queueAdminSignup } from './push';
 
 export const STATE_MAX_AGE = 600; // 10 นาที
 export type AuthMode = 'login' | 'link';
@@ -52,6 +53,7 @@ export function linkResult(env: Env, clearCookie: string, result: { linked: 'lin
 /** ล็อกอินสำเร็จ: สร้าง session · มาจากลิงก์เชิญ → ใช้ลิงก์ทันทีแล้วพาไปห้อง (ใช้ไม่ได้ → /join/<รหัส>?error=…) */
 export async function finishLogin(
   env: Env, clearCookie: string, user: { id: string; status: 'pending' | 'active' | 'blocked' }, inviteCode: string,
+  newUser?: { name: string; email: string },  // สมัครใหม่ → แจ้งแอดมินระบบ (2026-11-17)
 ): Promise<Response> {
   let cookie: string;
   try {
@@ -62,16 +64,26 @@ export async function finishLogin(
   }
   const headers = new Headers();
   headers.append('Set-Cookie', cookie);
-  if (!inviteCode) return backToApp(env, clearCookie, undefined, headers);
+  if (!inviteCode) {
+    if (newUser) await queueAdminSignup(env, { userId: user.id, ...newUser, via: 'signup' });
+    return backToApp(env, clearCookie, undefined, headers);
+  }
 
   let path: string;
   try {
     const r = await redeemInvite(env, inviteCode, user);
     path = `/room/${encodeURIComponent(r.roomId)}`;
+    if (newUser) {
+      const room = await env.DB.prepare(`SELECT title FROM rooms WHERE id = ?`).bind(r.roomId).first<{ title: string | null }>()
+        .catch((err) => { console.error('อ่านชื่อห้องสำหรับแจ้งแอดมินไม่สำเร็จ', err); return null; });
+      await queueAdminSignup(env, { userId: user.id, ...newUser, via: 'invite', roomTitle: room?.title ?? 'แชท 1:1' });
+    }
   } catch (err) {
     const code = err instanceof ApiError ? err.code : 'INVITE_FAILED';
     if (!(err instanceof ApiError)) console.error('ใช้ลิงก์เชิญหลังล็อกอินไม่สำเร็จ', err);
     path = `/join/${encodeURIComponent(inviteCode)}?error=${encodeURIComponent(code)}`;
+    // ลิงก์ใช้ไม่ได้ → คนใหม่ยังรออนุมัติ แอดมินต้องรู้
+    if (newUser) await queueAdminSignup(env, { userId: user.id, ...newUser, via: 'invite-failed' });
   }
   headers.set('Location', new URL(path, env.APP_URL).toString());
   headers.append('Set-Cookie', clearCookie);
