@@ -10,7 +10,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router';
-import type { ActivityFrame, ServerFrame } from '../shared/protocol';
+import type { ServerFrame } from '../shared/protocol';
 import { useNotify } from './notice';
 
 const PING_MS = 25_000;
@@ -29,7 +29,8 @@ export default function InAppNotifier() {
   const notify = useNotify();
   const nav = useNavigate();
   const location = useLocation();
-  const [banner, setBanner] = useState<ActivityFrame | null>(null);
+  // แบนเนอร์: ข้อความใหม่ในห้อง หรือแจ้งแอดมิน (มีคนสมัครใหม่ — 2026-11-17) · to = แตะแล้วไปไหน
+  const [banner, setBanner] = useState<{ title: string; body: string; to: string } | null>(null);
   const pathRef = useRef(location.pathname);
   pathRef.current = location.pathname;
   const notifyRef = useRef(notify);
@@ -64,11 +65,18 @@ export default function InAppNotifier() {
       sock.onmessage = (ev) => {
         let f: ServerFrame;
         try { f = JSON.parse(String(ev.data)) as ServerFrame; } catch { return; }
+        if (f.type === 'admin') {
+          window.dispatchEvent(new CustomEvent('admin-activity', { detail: f }));  // เมนู ☰ / หน้าแอดมินโหลดตัวเลขใหม่
+          setBanner({ title: f.title, body: f.body, to: f.url });
+          if (hide) clearTimeout(hide);
+          hide = window.setTimeout(() => setBanner(null), BANNER_MS);
+          return;
+        }
         if (f.type !== 'activity') return;
         setBadge(f.unread);
         window.dispatchEvent(new CustomEvent('chat-activity', { detail: f }));
         if (!f.notify || pathRef.current === `/room/${f.roomId}`) return;
-        setBanner(f);
+        setBanner({ title: f.title, body: f.body, to: `/room/${f.roomId}` });
         if (hide) clearTimeout(hide);
         hide = window.setTimeout(() => setBanner(null), BANNER_MS);
       };
@@ -101,8 +109,8 @@ export default function InAppNotifier() {
   return (
     <button
       className="inapp-banner"
-      onClick={() => { setBanner(null); nav(`/room/${banner.roomId}`); }}
-      aria-label={`ข้อความใหม่จาก ${banner.title} แตะเพื่อเปิด`}
+      onClick={() => { setBanner(null); nav(banner.to); }}
+      aria-label={`${banner.title} แตะเพื่อเปิด`}
     >
       <b>{banner.title}</b>
       <span>{banner.body}</span>

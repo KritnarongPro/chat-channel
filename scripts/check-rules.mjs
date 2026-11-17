@@ -278,10 +278,21 @@ for (const f of walk('worker', ['.ts'])) {
   if ((sync.match(/NOT_HIDDEN/g) ?? []).length < 3) fail('BUGS-19', 'handleSync ต้องกรอง NOT_HIDDEN ทั้งตอนเปิดห้อง (2 คำสั่ง) และตอนต่อใหม่');
 }
 
+// ---------- BUGS-20 คนสมัครใหม่ต้องแจ้งแอดมิน ทุกทาง (กันไว้ก่อน 2026-11-17) ----------
+{
+  const ag = read(join('worker', 'auth-google.ts'));
+  if (!/isNew = true/.test(ag) || !/finishLogin\(env, CLEAR, user, saved\.invite,\s*isNew \?/.test(ag)) fail('BUGS-20', 'googleCallback ต้องส่งข้อมูลคนสมัครใหม่ (isNew) ให้ finishLogin — ไม่งั้นแอดมินไม่รู้ว่ามีคนสมัคร');
+  const ac = read(join('worker', 'auth-common.ts'));
+  const fl = ac.slice(ac.indexOf('export async function finishLogin'));
+  for (const via of ["via: 'signup'", "via: 'invite'", "via: 'invite-failed'"]) {
+    if (!fl.includes(via)) fail('BUGS-20', `finishLogin ต้องเรียก queueAdminSignup กรณี ${via} (สมัครเอง / ลิงก์เชิญสำเร็จ / ลิงก์เชิญใช้ไม่ได้)`);
+  }
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..07, BUGS-01..19)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..07, BUGS-01..20)');

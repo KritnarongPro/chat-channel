@@ -73,6 +73,14 @@ export interface ActivityFrame {
   unread: number;         // ยังไม่อ่านรวมทุกห้อง (ไม่นับห้องที่ปิดเสียง) — ใช้ทำตัวเลขบนไอคอน
 }
 
+/** แจ้งแอดมินระบบ (2026-11-17): มีคนสมัครใหม่ / เข้าระบบผ่านลิงก์เชิญ — แตะแล้วไป url */
+export interface AdminFrame {
+  type: 'admin';
+  title: string;
+  body: string;
+  url: string;
+}
+
 export interface FileInfo {
   id: string;
   name: string;
@@ -132,4 +140,5 @@ export type ServerFrame =
   | { type: 'typing'; userId: string; name: string }
   | { type: 'poll'; seq: number; poll: PollState }
   | { type: 'hidden'; seq: number }                     // ลบเฉพาะฝั่งฉันแล้ว → ส่งให้ทุกเครื่องของคนนี้
-  | ActivityFrame;
+  | ActivityFrame
+  | AdminFrame;
