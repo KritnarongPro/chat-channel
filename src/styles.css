@@ -432,3 +432,29 @@ html.chat-open .route-view { height: 100%; min-height: 0; }  /* หน้าแ�
 .swipe-delete { background: var(--red); }
 .swipe-row .room-item { position: relative; background: var(--surface); touch-action: pan-y; -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
 .swipe-row .room-item.active { background: var(--blue-soft); }
+
+/* ---------- ลิงก์ของกลุ่ม: แถบลิงก์ด่วน · หน้ารวม · แผ่นเพิ่ม/แก้ (2026-11-18) ---------- */
+.link-icon { display: inline-flex; align-items: center; justify-content: center; flex: none; font-weight: 600; line-height: 1; color: #fff; overflow: hidden; }
+.link-icon-img { object-fit: cover; background: #fff; border: 1px solid var(--border); }
+.link-c-blue { background: #2a6fdb; } .link-c-green { background: #16a34a; } .link-c-amber { background: #d97706; } .link-c-red { background: #dc2626; }
+.link-c-purple { background: #7c3aed; } .link-c-teal { background: #0d9488; } .link-c-pink { background: #db2777; } .link-c-gray { background: #6b7280; }
+.links-bar { display: flex; gap: 4px; overflow-x: auto; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--surface); scrollbar-width: none; flex: none; }
+.links-bar::-webkit-scrollbar { display: none; }
+.links-bar-item { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 64px; flex: none; padding: 2px 0; text-decoration: none; color: var(--text); font-size: 11px; border-radius: 10px; }
+.links-bar-item span:last-child { max-width: 62px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.links-bar-all { border-radius: 11px; background: var(--surface-2); color: var(--muted); border: 1px dashed var(--border); font-size: 20px; }
+.link-list { list-style: none; margin: 0; padding: 0; }
+.link-list li { display: flex; align-items: center; border-bottom: 1px solid var(--border); }
+.link-row { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 10px 6px 10px 14px; min-height: 64px; color: inherit; text-decoration: none; }
+.link-row .grow { display: flex; flex-direction: column; min-width: 0; }
+.link-more { border: 0; background: none; color: var(--muted); cursor: pointer; margin-right: 6px; }
+.link-sheet .field { gap: 6px; }
+.link-icon-row { display: flex; align-items: center; gap: 12px; }
+.emoji-pick { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.emoji-pick button { width: 44px; height: 44px; font-size: 24px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); cursor: pointer; }
+.emoji-pick button.on { border: 2px solid var(--blue); background: var(--blue-soft); }
+.emoji-pick input { width: 88px; }
+.color-pick { display: flex; gap: 8px; flex-wrap: wrap; }
+.color-pick button { width: 36px; height: 36px; border-radius: 50%; border: 3px solid transparent; cursor: pointer; }
+.color-pick button.on { border-color: var(--text); }
+.ok-text { color: var(--green-text); }

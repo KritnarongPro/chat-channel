@@ -233,3 +233,80 @@ export async function linkPreviewImage(env: Env, rawUrl: string | null) {
     },
   });
 }
+
+// =====================================================================
+// ไอคอนของเว็บ (2026-11-18 — ลิงก์ของกลุ่ม: ไอคอนอัตโนมัติ)
+//   อ่านหน้าเว็บผ่าน safeFetch (ตรวจทุก redirect — BUGS-18) → หา apple-touch-icon / icon (PNG/JPG/WEBP/ICO)
+//   → ไม่มีก็ลอง /favicon.ico · ไม่รับ SVG (อาจมีสคริปต์) · ≤ 300KB · ตรวจหัวไฟล์จริง
+//   ไม่สำเร็จ → ApiError พร้อมเหตุผลไทย (ผู้เรียกเปลี่ยนเป็นไอคอนตัวอักษร + แจ้งเหตุผล ไม่ข้ามเงียบ)
+// =====================================================================
+const ICON_MAX_BYTES = 300 * 1024;
+
+/** หัวไฟล์จริงของไอคอน — JPEG / PNG / WEBP / ICO */
+export function sniffIcon(b: Uint8Array): string | null {
+  if (b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b.length > 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b.length > 12 && String.fromCharCode(...b.slice(0, 4)) === 'RIFF' && String.fromCharCode(...b.slice(8, 12)) === 'WEBP') return 'image/webp';
+  if (b.length > 4 && b[0] === 0 && b[1] === 0 && b[2] === 1 && b[3] === 0) return 'image/x-icon';
+  return null;
+}
+
+/** หาไอคอนจาก <link rel="..."> — apple-touch-icon (ใหญ่ ชัด) ก่อน แล้วค่อย icon ทั่วไป · ข้าม .svg */
+export function findIconHrefs(html: string, baseUrl: string): string[] {
+  const found: { href: string; score: number }[] = [];
+  for (const tag of html.match(/<link\b[^>]*>/gi) ?? []) {
+    const rel = /\brel\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1]?.toLowerCase() ?? '';
+    const href = /\bhref\s*=\s*"([^"]*)"|\bhref\s*=\s*'([^']*)'/i.exec(tag);
+    const raw = href?.[1] ?? href?.[2];
+    if (!raw || !/(^|\s)(apple-touch-icon|apple-touch-icon-precomposed|icon|shortcut icon)(\s|$)/.test(rel)) continue;
+    if (/\.svg(\?|#|$)/i.test(raw) || /image\/svg/i.test(tag)) continue;
+    try {
+      const abs = new URL(decodeEntities(raw), baseUrl).toString();
+      if (/^https?:/.test(abs)) found.push({ href: abs, score: rel.includes('apple-touch-icon') ? 0 : 1 });
+    } catch {
+      console.warn('ลิงก์ไอคอนในหน้าเว็บผิดรูปแบบ — ข้าม', raw);
+    }
+  }
+  return found.sort((a, b) => a.score - b.score).map((f) => f.href);
+}
+
+async function fetchIconAt(url: string): Promise<{ bytes: Uint8Array; mime: string }> {
+  const { res } = await safeFetch(url, 'image/png,image/jpeg,image/webp,image/x-icon,image/*;q=0.5');
+  if (!res.ok) { await res.body?.cancel(); throw new ApiError(502, 'HTTP_ERROR', `เว็บตอบ ${res.status} ตอนดึงไอคอน`); }
+  const bytes = await readLimited(res, ICON_MAX_BYTES, true);
+  const mime = sniffIcon(bytes);
+  if (!mime) throw new ApiError(415, 'BAD_ICON', 'ไอคอนของเว็บนี้เป็นชนิดที่ไม่รองรับ (เช่น SVG)');
+  return { bytes, mime };
+}
+
+export async function fetchSiteIcon(pageUrl: string): Promise<{ bytes: Uint8Array; mime: string }> {
+  const bad = unsafeUrlReason(pageUrl);
+  if (bad) throw new ApiError(400, 'UNSAFE_URL', `ดึงไอคอนไม่ได้: ${bad}`);
+  const tried: string[] = [];
+  let finalUrl = pageUrl;
+  try {
+    const r = await safeFetch(pageUrl, 'text/html,application/xhtml+xml');
+    finalUrl = r.finalUrl;
+    const type = (r.res.headers.get('Content-Type') ?? '').toLowerCase();
+    if (r.res.ok && (type.includes('text/html') || type.includes('xhtml'))) {
+      const html = new TextDecoder('utf-8').decode(await readLimited(r.res, MAX_HTML_BYTES, false));
+      for (const href of findIconHrefs(html, finalUrl).slice(0, 3)) {
+        try {
+          return await fetchIconAt(href);
+        } catch (err) {
+          tried.push(err instanceof ApiError ? err.message : 'อ่านไอคอนไม่ได้');
+        }
+      }
+    } else {
+      await r.res.body?.cancel();
+    }
+  } catch (err) {
+    tried.push(err instanceof ApiError ? err.message : 'เปิดหน้าเว็บไม่ได้');
+  }
+  try {
+    return await fetchIconAt(new URL('/favicon.ico', finalUrl).toString());
+  } catch (err) {
+    tried.push(err instanceof ApiError ? err.message : 'ไม่มี favicon.ico');
+  }
+  throw new ApiError(422, 'NO_ICON', `ไม่พบไอคอนของเว็บนี้ (${[...new Set(tried)].slice(0, 2).join(' · ')})`);
+}

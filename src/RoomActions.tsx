@@ -61,13 +61,15 @@ export function MuteSheet({ room, onClose, onSaved }: {
 /** ข้อความยืนยันลบแชทฝั่งฉัน — ใช้ทั้งเมนูห้องและปุ่มปัดซ้ายในรายการแชท */
 export const CLEAR_CONFIRM = 'ลบแชทนี้ฝั่งคุณ? ประวัติข้อความจะหายจากเครื่องคุณ และห้องจะหายจากรายการ (คนอื่นยังเห็นครบ) — มีข้อความใหม่ห้องจะกลับมาเอง';
 
-export function RoomMenu({ room, members: given, onClose, fromList, onChanged }: {
+export function RoomMenu({ room, members: given, onClose, fromList, onChanged, links }: {
   room: Room;
   members: RoomMember[] | null;  // null = เปิดจากหน้ารายการแชท → โหลดรายชื่อเองตอนเจ้าของจะออก (ต้องเลือกคนรับต่อ)
   onClose: () => void;
   /** เปิดจากหน้ารายการแชท (กดค้าง): เพิ่มปุ่มปิดเสียง + อ่านแล้วทั้งหมด */
   fromList?: { onMute: () => void; onMarkRead: () => Promise<void> };
   onChanged?: () => void;  // ลบแชท/ออกจากกลุ่มสำเร็จ → ให้รายการแชทโหลดใหม่
+  /** ในห้องกลุ่ม/ชาเนล: ลิงก์ของกลุ่ม + ซ่อน/แสดงแถบลิงก์ด่วน (2026-11-18) */
+  links?: { count: number; hasPinned: boolean; barHidden: boolean; onToggleBar: () => void };
 }) {
   const [loaded, setLoaded] = useState<RoomMember[] | null>(null);
   const members = given ?? loaded ?? [];
@@ -157,7 +159,13 @@ export function RoomMenu({ room, members: given, onClose, fromList, onChanged }:
                 </li>
               </>
             ) : (
-              <li><Link to={`/room/${encodeURIComponent(room.id)}/notes`}>📝 โน้ตของห้องนี้</Link></li>
+              <>
+                <li><Link to={`/room/${encodeURIComponent(room.id)}/notes`}>📝 โน้ตของห้องนี้</Link></li>
+                {links && <li><Link to={`/room/${encodeURIComponent(room.id)}/links`}>🔗 ลิงก์ของ{room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม'}{links.count ? ` (${links.count})` : ''}</Link></li>}
+                {links?.hasPinned && (
+                  <li><button onClick={() => { links.onToggleBar(); onClose(); }}>{links.barHidden ? '👁 แสดงแถบลิงก์ด่วน' : '🙈 ซ่อนแถบลิงก์ด่วน (เฉพาะเครื่องนี้)'}</button></li>
+                )}
+              </>
             )}
             <li><button disabled={busy} onClick={() => void clear()}>🧹 ลบแชท (เฉพาะฝั่งฉัน)</button></li>
             {room.type === 'group' && (

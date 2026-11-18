@@ -14,6 +14,7 @@ import PendingPage from './pages/PendingPage';
 import AppShell, { HomeRoute } from './AppShell';
 import MenuPage from './pages/MenuPage';
 import ProfilePage from './pages/ProfilePage';
+import RoomLinksPage from './pages/RoomLinksPage';
 import NewChatPage from './pages/NewChatPage';
 import ChatRoomPage from './pages/ChatRoomPage';
 import AdminPage from './pages/AdminPage';
@@ -136,6 +137,7 @@ function App() {
           <Route path="add/:userId" element={<AddFriendPage />} />
           <Route path="notes" element={<MyNotesPage />} />
           <Route path="room/:id/notes" element={<RoomNotesPage />} />
+          <Route path="room/:id/links" element={<RoomLinksPage />} />
           <Route path="note/:noteId" element={<NotePage />} />
           <Route path="admin/stickers" element={me.user.role === 'admin' ? <AdminStickersPage /> : <Navigate to="/" replace />} />
           <Route path="admin/bots" element={me.user.role === 'admin' ? <AdminBotsPage /> : <Navigate to="/" replace />} />
