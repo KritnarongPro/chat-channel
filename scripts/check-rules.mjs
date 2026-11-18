@@ -316,10 +316,22 @@ for (const f of walk('src', ['.css'])) {
   if (!/installViewportFix\(\);/.test(main)) fail('BUGS-21', 'main.tsx ต้องเรียก installViewportFix()');
 }
 
+// ---------- BUGS-22 iPad 2 ช่อง: รายการแชทซ้ายต้องอัปเดตตามห้องที่เปิด + หน้าแชทยังสูงเท่าจอ (เจอ 2026-11-18) ----------
+{
+  const page = read(join('src', 'pages', 'ChatRoomPage.tsx'));
+  if (!/dispatchEvent\(new Event\('room-seen'\)\)/.test(page)) fail('BUGS-22', "ChatRoomPage ต้องส่ง event 'room-seen' เมื่อมีข้อความใหม่ (ไม่งั้นช่องซ้ายบน iPad ค้างข้อความเก่า)");
+  const counts = read(join('src', 'counts.tsx'));
+  if (!/addEventListener\('room-seen'/.test(counts)) fail('BUGS-22', "counts.tsx ต้องฟัง event 'room-seen' แล้วโหลดรายการแชทใหม่");
+  const main = read(join('src', 'main.tsx'));
+  if (!/<Route element=\{<AppShell \/>\}>/.test(main)) fail('BUGS-22', 'main.tsx ต้องครอบหน้าที่ล็อกอินแล้วด้วย <Route element={<AppShell />}> (แถบล่าง + 2 ช่อง)');
+  const css = read(join('src', 'styles.css'));
+  if (!/html\.chat-open \.route-view \{ height: 100%/.test(css)) fail('BUGS-22', 'styles.css ต้องมี html.chat-open .route-view { height: 100% } (ไม่งั้นหน้าแชทบนมือถือยืดตามข้อความ ช่องพิมพ์หลุดจอ)');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..21)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..22)');

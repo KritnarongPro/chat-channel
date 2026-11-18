@@ -68,7 +68,7 @@ input, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--borde
 /* ---------- โครงหน้า ---------- */
 .page { max-width: 720px; margin: 0 auto; min-height: 100%; background: var(--surface); display: flex; flex-direction: column; position: relative; }
 .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 8px; padding: 8px 12px; padding-top: max(8px, env(safe-area-inset-top)); background: var(--surface); border-bottom: 1px solid var(--border); min-height: 52px; }
-.topbar-back { font-size: 30px; line-height: 1; color: var(--blue); text-decoration: none; width: 28px; }
+.topbar-back { font-size: 30px; line-height: 1; color: var(--blue); text-decoration: none; width: 44px; height: 44px; margin-left: -8px; display: inline-flex; align-items: center; justify-content: center; flex: none; }  /* กดได้ 44px (2026-11-18) */
 .topbar-gap { width: 4px; }
 .topbar-title { flex: 1; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .topbar-right { display: flex; gap: 4px; }
@@ -86,7 +86,6 @@ input, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--borde
 .room-time { font-size: 12px; color: var(--muted); flex: none; }
 .room-preview { color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .badge { background: var(--blue); color: #fff; border-radius: 999px; font-size: 12px; padding: 1px 7px; flex: none; }
-.fab { position: fixed; right: 20px; bottom: calc(20px + env(safe-area-inset-bottom)); width: 56px; height: 56px; border-radius: 50%; background: var(--blue); color: #fff; font-size: 32px; display: flex; align-items: center; justify-content: center; text-decoration: none; box-shadow: 0 4px 12px rgba(0,0,0,.2); }
 
 /* ---------- เลือกผู้ใช้ ---------- */
 .form-block { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
@@ -127,9 +126,6 @@ html.chat-open .messages { overscroll-behavior: contain; }
 .login h1 { margin-top: 15vh; }
 
 /* ---------- ไฟล์ / รูป / เสียง (เฟส 2) ---------- */
-.composer-tools { display: flex; gap: 4px; margin-bottom: 6px; }
-.tool { background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; font-size: 14px; cursor: pointer; }
-.tool:disabled { opacity: .5; }
 .msg-image { display: block; max-width: 100%; max-height: 320px; width: auto; height: auto; border-radius: 10px; margin: 2px 0; background: var(--bg); }
 .msg-audio { width: 240px; max-width: 100%; display: block; }
 .file-card { display: flex; gap: 8px; align-items: center; text-decoration: none; color: inherit; padding: 6px 4px; }
@@ -209,7 +205,6 @@ select { font: inherit; width: 100%; padding: 9px 10px; border: 1px solid var(--
 .mention-list button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 6px; border: 0; background: none; font: inherit; text-align: left; cursor: pointer; border-radius: 6px; }
 .mention-list button:hover { background: var(--surface-2); }
 .bubble-more { margin-left: 6px; border: 0; background: none; padding: 0 4px; font: inherit; color: inherit; opacity: .6; cursor: pointer; }
-.tool-on { background: #fde68a; }
 .badge-muted { background: #9ca3af; }
 .bubble-row.flash .bubble { outline: 3px solid #fbbf24; transition: outline .3s; }
 
@@ -337,3 +332,78 @@ button.read-mark { padding: 0; border: 0; background: none; cursor: pointer; tex
 .msg-popup-react button:disabled { opacity: .5; }
 .msg-popup-note { background: var(--surface); border-radius: 8px; padding: 4px 8px; }
 .copy-part { width: 100%; font: inherit; user-select: text; -webkit-user-select: text; }
+
+/* ---------- มือถือ + iPad (2026-11-18) — AppShell.tsx / gestures.ts ----------
+   ขนาดที่นิ้วกดได้ ≥ 44px (Apple) · แถบเมนูล่าง · 2 ช่องบนจอกว้าง ≥ 768px · ช่องพิมพ์แบบ LINE */
+.icon-btn { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; padding: 0 6px; font-size: 20px; line-height: 1; position: relative; }
+.topbar-right .btn-small { min-height: 44px; min-width: 44px; }
+.topbar-room { min-height: 44px; justify-content: center; }
+
+/* แถบเมนูล่าง: มือถือ = ติดล่างจอเฉพาะ 4 หน้าหลัก · iPad = อยู่ล่างช่องซ้าย */
+.route-view { min-height: 100%; display: flex; flex-direction: column; }
+.route-view > .page { flex: 1; width: 100%; }
+.has-tabbar > .page { padding-bottom: calc(60px + env(safe-area-inset-bottom)); }
+.tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; display: flex; background: var(--surface); border-top: 1px solid var(--border); padding-bottom: env(safe-area-inset-bottom); }
+.tab { flex: 1; min-height: 56px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: var(--muted); text-decoration: none; font-size: 11.5px; }
+.tab.on { color: var(--blue); font-weight: 600; }
+.tab-icon { position: relative; font-size: 22px; line-height: 1; }
+.tab-icon .badge { position: absolute; top: -6px; left: 14px; font-size: 10px; padding: 0 5px; line-height: 16px; font-weight: 600; }
+
+/* 2 ช่อง (iPad แนวตั้ง + แนวนอน, คอม) */
+.split { display: flex; height: var(--app-h, 100dvh); overflow: hidden; background: var(--surface); }
+.split-list { width: 340px; flex: none; display: flex; flex-direction: column; border-right: 1px solid var(--border); min-height: 0; }
+.split-list > .page { flex: 1; min-height: 0; overflow-y: auto; max-width: none; margin: 0; }
+.split-list .tabbar { position: static; padding-bottom: env(safe-area-inset-bottom); }
+.split-main { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; position: relative; background: var(--bg); }
+.split-main > .page { max-width: none; margin: 0; min-height: 100%; }
+.split-main > .chat-page { height: 100%; min-height: 0; }
+.split-main > .chat-page .topbar-back { display: none; }  /* รายการแชทอยู่ซ้ายแล้ว ไม่ต้องย้อนกลับ */
+.split-main .bubble { max-width: min(78%, 560px); }
+.split .sheet { max-width: 560px; border-radius: 16px; margin-bottom: 16px; }
+.room-item.active { background: var(--blue-soft); }
+.empty-pane { align-items: center; justify-content: center; gap: 12px; text-align: center; background: var(--bg) !important; }
+.empty-pane-icon { font-size: 56px; opacity: .5; }
+
+/* หน้าเมนู */
+.menu-profile { display: flex; align-items: center; gap: 12px; padding: 16px 14px; border-bottom: 1px solid var(--border); }
+.menu-profile b { display: block; }
+.menu-page a, .menu-page button { min-height: 52px; padding: 12px 14px; border-bottom: 1px solid var(--border); border-radius: 0; }
+
+/* แถบบาง "ติดตั้งแอป / เปิดแจ้งเตือน" บนรายการแชท (ปิดได้ 7 วัน) */
+.setup-bar { display: flex; align-items: center; margin: 8px 12px 4px; border-radius: 10px; background: var(--blue-soft); }
+.setup-bar-main { flex: 1; min-width: 0; min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 12px; border: 0; background: none; color: var(--text); font: inherit; font-size: 14px; text-align: left; cursor: pointer; }
+.setup-bar-go { margin-left: auto; color: var(--blue); white-space: nowrap; font-weight: 600; }
+.setup-bar-x { width: 44px; height: 44px; flex: none; border: 0; background: none; color: var(--muted); font-size: 16px; cursor: pointer; }
+.sheet .setup-card { margin: 0; }
+
+/* ช่องพิมพ์แบบ LINE: [＋][🖼][พิมพ์…][😊][ส่ง] + ตารางเครื่องมือ */
+.composer-row { gap: 4px; align-items: flex-end; }
+.composer-row textarea { flex: 1; min-width: 0; min-height: 44px; padding: 10px 12px; border-radius: 22px; }
+.composer-icon { flex: none; border: 0; background: none; color: var(--blue); border-radius: 50%; cursor: pointer; font-size: 22px; }
+.composer-icon.on { background: var(--blue-soft); }
+.composer-icon:disabled { opacity: .4; }
+.composer-icon .dot { position: absolute; top: 8px; right: 8px; width: 8px; height: 8px; border-radius: 50%; background: #f59e0b; }
+.composer-send { flex: none; min-height: 44px; padding: 0 16px; border-radius: 22px; }
+.tool-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 10px 0 2px; }
+.tool-grid button { display: flex; flex-direction: column; align-items: center; gap: 4px; min-height: 72px; padding: 8px 2px; border: 0; border-radius: 12px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 12.5px; cursor: pointer; text-align: center; }
+.tool-grid button span { font-size: 24px; line-height: 1; }
+.tool-grid button.on { background: #fde68a; color: #111; }
+
+/* ปัดข้อความไปทางขวา = ตอบกลับ (ลูกศรโผล่ทางซ้ายตามระยะปัด) */
+.messages { touch-action: pan-y; }
+.bubble-row { position: relative; }
+.bubble-row[data-swipe]::before { content: '↩'; position: absolute; left: 4px; top: 50%; transform: translateY(-50%) scale(calc(.6 + .4 * var(--swipe, 0))); opacity: var(--swipe, 0); width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--surface-2); color: var(--blue); font-size: 18px; }
+.bubble-row[data-swipe="ready"]::before { background: var(--blue); color: #fff; }
+
+/* ปุ่ม/ลิงก์เล็กที่เดิมกดยาก (ตรวจ 2026-11-18: 14–37px) */
+.bubble-more { padding: 6px 8px; margin: -6px -6px -6px 2px; min-width: 32px; min-height: 32px; }
+button.read-mark { padding: 8px 4px; margin: -8px 2px -8px 0; }
+.pinned-bar .link, .reply-draft .link, .pin-item > .link, .sheet-head .link { min-height: 44px; min-width: 44px; padding: 0 10px; display: inline-flex; align-items: center; justify-content: center; }
+.user-item input[type=checkbox], .row-check input[type=checkbox] { width: 24px; height: 24px; }
+.chip { min-height: 40px; display: inline-flex; align-items: center; }
+.btn-small { min-height: 36px; }
+html.chat-open .route-view { height: 100%; min-height: 0; }  /* หน้าแชทต้องสูงเท่าจอพอดี (BUGS-21) แม้อยู่ใน route-view */
+.user-item > .link { min-height: 44px; padding: 0 10px; flex: none; }
+.reaction-chips { min-height: 32px; align-items: center; }
+.reaction-chips span { padding: 2px 9px; }
+.setup-bar-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

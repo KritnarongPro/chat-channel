@@ -28,6 +28,7 @@ import { OutgoingFile, useRoomSocket } from '../useRoomSocket';
 import MessageContent from '../MessageContent';
 import Loading from '../Loading';
 import { lockChatViewport } from '../viewport';
+import { useSwipeReply } from '../gestures';
 import VoiceRecorder from '../VoiceRecorder';
 import InvitePanel from '../InvitePanel';
 import { formatDuration, formatSize, prepareImage, prepareVideo } from '../media';
@@ -72,6 +73,13 @@ export default function ChatRoomPage() {
   useEffect(() => lockChatViewport(), []);
   const [showPoll, setShowPoll] = useState(false);
   const [showPins, setShowPins] = useState(false);
+  // ---------- มือถือ/iPad (2026-11-18): ตารางเครื่องมือ ＋ · ปัดข้อความไปขวาเพื่อตอบกลับ ----------
+  const [showTools, setShowTools] = useState(false);
+  const textRef = useRef<HTMLTextAreaElement>(null);
+  const swipe = useSwipeReply<ChatMessage>((m) => {
+    setReplyTo({ seq: m.seq, senderName: m.senderName, snippet: previewText(m) });
+    textRef.current?.focus();
+  }, () => clearTimeout(pressTimer.current));  // นิ้วขยับ = ไม่ใช่กดค้าง → ยกเลิกเปิดเมนู
 
   const loadRoom = useCallback(async () => {
     try {
@@ -103,6 +111,13 @@ export default function ChatRoomPage() {
   useEffect(() => {
     if (s.conn === 'open' && document.visibilityState === 'visible') s.markRead(lastSeq);
   }, [lastSeq, s.conn, s.markRead]);
+  // iPad 2 ช่อง: มีข้อความใหม่ในห้องนี้ (รวมที่เราส่งเอง) → บอกรายการแชทช่องซ้ายให้โหลดใหม่ (ข้อความล่าสุด/ยังไม่อ่าน)
+  //   รอ 0.8 วิ ให้ "อ่านแล้ว" ถึงห้องก่อน ไม่งั้นตัวเลขยังไม่อ่านค้าง · มือถือไม่มีใครฟัง → ไม่โหลดเปล่า
+  useEffect(() => {
+    if (!lastSeq) return;
+    const t = window.setTimeout(() => window.dispatchEvent(new Event('room-seen')), 800);
+    return () => clearTimeout(t);
+  }, [lastSeq]);
 
   function onScroll() {
     const el = listRef.current;
@@ -325,12 +340,12 @@ export default function ChatRoomPage() {
         }
         right={room && (
           <>
-            <button className="btn btn-small btn-ghost" onClick={() => setShowSearch(true)} aria-label="ค้นหาข้อความในห้องนี้">🔍</button>
-            <Link to={`/room/${encodeURIComponent(id)}/notes`} className="btn btn-small btn-ghost" aria-label="โน้ตของห้องนี้">📝</Link>
-            <button className="btn btn-small btn-ghost" onClick={() => setShowRoomMenu(true)} aria-label="เมนูห้อง">⋯</button>
-            <button className="btn btn-small btn-ghost" onClick={() => setShowMute(true)} aria-label="ตั้งค่าแจ้งเตือนห้องนี้">
+            {/* 2026-11-18: เหลือ 3 ปุ่ม (ขนาดกดได้ 44px) — 📝 โน้ตของห้อง ย้ายไปอยู่ในเมนู ⋯ */}
+            <button className="btn btn-small btn-ghost icon-btn" onClick={() => setShowSearch(true)} aria-label="ค้นหาข้อความในห้องนี้">🔍</button>
+            <button className="btn btn-small btn-ghost icon-btn" onClick={() => setShowMute(true)} aria-label="ตั้งค่าแจ้งเตือนห้องนี้">
               {room.muted ? '🔕' : '🔔'}
             </button>
+            <button className="btn btn-small btn-ghost icon-btn" onClick={() => setShowRoomMenu(true)} aria-label="เมนูห้อง (โน้ต / ลบแชท / ออกจากกลุ่ม)">⋯</button>
           </>
         )}
       />
@@ -411,7 +426,10 @@ export default function ChatRoomPage() {
                 <div
                   className={`bubble ${m.kind === 'sticker' ? 'bubble-sticker' : ''}`}
                   onContextMenu={(e) => { e.preventDefault(); openMenu(m, e.currentTarget); }}
-                  onTouchStart={(e) => pressStart(m, e.currentTarget)} onTouchEnd={pressEnd} onTouchMove={pressEnd}
+                  onTouchStart={(e) => { pressStart(m, e.currentTarget); swipe.start(e, m, e.currentTarget, !!room?.canPost && !m.deleted); }}
+                  onTouchMove={swipe.move}
+                  onTouchEnd={() => { pressEnd(); swipe.end(); }}
+                  onTouchCancel={() => { pressEnd(); swipe.end(); }}
                 >
                   {!mine && isGroup && <div className="bubble-name">{m.senderName}</div>}
                   {!m.deleted && m.extra?.forwardedFrom && <div className="forwarded">↪️ ส่งต่อจาก {m.extra.forwardedFrom}</div>}
@@ -525,40 +543,42 @@ export default function ChatRoomPage() {
           />
         ) : (
         <>
-        <div className="composer-tools">
-          <button type="button" className="tool" onClick={() => imageInput.current?.click()} disabled={s.conn === 'failed'}>🖼 รูป/วิดีโอ</button>
-          <button type="button" className="tool" onClick={() => fileInput.current?.click()} disabled={s.conn === 'failed'}>📎 ส่งเป็นไฟล์</button>
-          <button type="button" className="tool" onClick={() => setRecording(true)} disabled={s.conn === 'failed'}>🎤 เสียง</button>
-          <button type="button" className={`tool ${showStickers ? 'tool-on' : ''}`} onClick={() => setShowStickers((v) => !v)} disabled={s.conn === 'failed'} aria-pressed={showStickers}>😺 สติกเกอร์</button>
-          {hasMembers && (
-            <button type="button" className="tool" onClick={() => setShowPoll(true)} disabled={s.conn === 'failed'}>📊 โพล</button>
-          )}
-          {me.user.role === 'admin' && (
-            <button type="button" className="tool" onClick={() => void openFormPicker()} disabled={s.conn === 'failed'}>📝 ฟอร์ม</button>
-          )}
-          <button
-            type="button"
-            className={`tool ${silent ? 'tool-on' : ''}`}
-            onClick={() => setSilent((v) => !v)}
-            aria-pressed={silent}
-            title="ส่งแบบเงียบ: คนรับเห็นข้อความแต่มือถือไม่เด้ง"
-          >
-            {silent ? '🔕 เงียบอยู่' : '🔕 ส่งเงียบ'}
-          </button>
-          <input ref={imageInput} type="file" accept="image/*,video/*" multiple hidden onChange={(e) => void onPickImages(e.target.files)} />
-          <input ref={fileInput} type="file" multiple hidden onChange={(e) => onPickFiles(e.target.files)} />
-        </div>
+        {/* 2026-11-18 (ผู้ใช้เลือก): แบบ LINE — ช่องพิมพ์บรรทัดเดียว [＋][🖼][พิมพ์…][😊][ส่ง] · ＋ เปิดตารางเครื่องมือ */}
         <div className="composer-row">
+          <button type="button" className={`icon-btn composer-icon ${showTools ? 'on' : ''}`} onClick={() => { setShowTools((v) => !v); setShowStickers(false); }}
+            disabled={s.conn === 'failed'} aria-expanded={showTools} aria-label={showTools ? 'ปิดเครื่องมือ' : `เครื่องมือ (ไฟล์ เสียง${hasMembers ? ' โพล' : ''} ส่งเงียบ)`}>
+            {showTools ? '✕' : '＋'}{silent && <span className="dot" aria-hidden="true" />}
+          </button>
+          <button type="button" className="icon-btn composer-icon" onClick={() => imageInput.current?.click()} disabled={s.conn === 'failed'} aria-label="ส่งรูป/วิดีโอ">🖼</button>
           <textarea
+            ref={textRef}
             value={text}
             onChange={(e) => { setText(e.target.value); if (inputError) setInputError(''); if (e.target.value.trim()) s.sendTyping(); }}
             onKeyDown={onKey}
+            onFocus={() => setShowTools(false)}
             rows={1}
             maxLength={MAX_MESSAGE_CHARS}
-            placeholder={silent ? 'พิมพ์ข้อความ (ส่งแบบเงียบ)' : hasMembers ? 'พิมพ์ข้อความ · @ เพื่อเรียกชื่อ' : 'พิมพ์ข้อความ'}
+            placeholder={silent ? 'ส่งแบบเงียบ' : hasMembers ? 'พิมพ์ · @ เรียกชื่อ' : 'พิมพ์ข้อความ'}
           />
-          <button className="btn" disabled={s.conn === 'failed'}>ส่ง</button>
+          <button type="button" className={`icon-btn composer-icon ${showStickers ? 'on' : ''}`} onClick={() => { setShowStickers((v) => !v); setShowTools(false); }}
+            disabled={s.conn === 'failed'} aria-pressed={showStickers} aria-label="สติกเกอร์">😊</button>
+          <button className="btn composer-send" disabled={s.conn === 'failed'}>ส่ง</button>
         </div>
+        {showTools && (
+          <div className="tool-grid" role="group" aria-label="เครื่องมือส่ง">
+            <button type="button" onClick={() => { setShowTools(false); imageInput.current?.click(); }}><span>🖼</span>รูป/วิดีโอ</button>
+            <button type="button" onClick={() => { setShowTools(false); fileInput.current?.click(); }}><span>📎</span>ส่งเป็นไฟล์</button>
+            <button type="button" onClick={() => { setShowTools(false); setRecording(true); }}><span>🎤</span>ข้อความเสียง</button>
+            {hasMembers && <button type="button" onClick={() => { setShowTools(false); setShowPoll(true); }}><span>📊</span>โพล</button>}
+            {me.user.role === 'admin' && <button type="button" onClick={() => { setShowTools(false); void openFormPicker(); }}><span>📝</span>ฟอร์ม</button>}
+            <button type="button" className={silent ? 'on' : ''} onClick={() => setSilent((v) => !v)} aria-pressed={silent}
+              title="ส่งแบบเงียบ: คนรับเห็นข้อความแต่มือถือไม่เด้ง">
+              <span>🔕</span>{silent ? 'เงียบอยู่ (แตะปิด)' : 'ส่งเงียบ'}
+            </button>
+          </div>
+        )}
+        <input ref={imageInput} type="file" accept="image/*,video/*" multiple hidden onChange={(e) => void onPickImages(e.target.files)} />
+        <input ref={fileInput} type="file" multiple hidden onChange={(e) => onPickFiles(e.target.files)} />
         </>
         )}
       </form>
@@ -876,6 +896,7 @@ function RoomMenu({ room, members, onClose }: { room: Room; members: RoomMember[
         <div className="sheet-head"><b className="ellipsis">{room.title}</b><button className="link" onClick={onClose}>ปิด</button></div>
         {!picking ? (
           <ul className="menu-list">
+            <li><Link to={`/room/${encodeURIComponent(room.id)}/notes`}>📝 โน้ตของห้องนี้</Link></li>
             <li><button disabled={busy} onClick={() => void clear()}>🧹 ลบแชท (เฉพาะฝั่งฉัน)</button></li>
             {room.type === 'group' && (
               <li>

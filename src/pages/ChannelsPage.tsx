@@ -67,7 +67,6 @@ export default function ChannelsPage() {
     <div className="page">
       <TopBar
         title="ชาเนล"
-        back="/"
         right={me.user.role === 'admin' && !creating ? <button className="btn btn-small" onClick={() => setCreating(true)}>+ สร้างชาเนล</button> : null}
       />
       {creating && (

@@ -90,7 +90,7 @@ export default function FriendsPage() {
 
   return (
     <div className="page">
-      <TopBar title="เพื่อน" back="/" />
+      <TopBar title="เพื่อน" />
       <div className="tabs">
         <button className={`chip ${tab === 'friends' ? 'on' : ''}`} onClick={() => setTab('friends')}>เพื่อน {data ? `(${data.friends.length})` : ''}</button>
         <button className={`chip ${tab === 'requests' ? 'on' : ''}`} onClick={() => setTab('requests')}>คำขอ {reqCount > 0 ? `(${reqCount})` : ''}</button>
