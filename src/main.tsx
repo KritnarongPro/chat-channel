@@ -18,6 +18,7 @@ import AdminPage from './pages/AdminPage';
 import ChannelsPage from './pages/ChannelsPage';
 import SettingsPage from './pages/SettingsPage';
 import { initPwa } from './pwa';
+import { installViewportFix } from './viewport';
 import AdminBotsPage from './pages/AdminBotsPage';
 import AdminFormsPage from './pages/AdminFormsPage';
 import FormFillPage from './pages/FormFillPage';
@@ -144,6 +145,8 @@ function App() {
 
 // ติดตั้งแอป + แจ้งเตือน: ต้องดักเหตุการณ์ติดตั้งตั้งแต่เปิดหน้า
 initPwa();
+// iPad/iPhone: กันหน้าแชทเด้งขึ้นบนตอนคีย์บอร์ดขึ้น/หาย (viewport.ts)
+installViewportFix();
 // เฟส 5: ใส่ธีม/ขนาดตัวอักษรที่จำไว้ในเครื่องก่อนวาดหน้า (กันจอกระพริบสี) แล้วค่อยโหลดค่าจริงจากบัญชี
 applyPrefs(cachedPrefs());
 

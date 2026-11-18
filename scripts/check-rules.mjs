@@ -190,6 +190,23 @@ for (const f of walk('worker', ['.ts'])) {
   });
 }
 
+// ---------- CORE-08 ช่องพิมพ์ต้องไม่เล็กกว่า 16px (เจอ 2026-11-18 ในโปรเจกต์แชท) ----------
+// iPhone/iPad ซูมทั้งหน้าเองเมื่อแตะ input/textarea/select ที่ตัวอักษร < 16px → หน้าเลื่อน/ช่องพิมพ์ลอยไปบนสุด
+// ใช้ max(16px, …) เมื่อขนาดมาจากตัวแปร (เช่น ตั้งค่าตัวอักษรของผู้ใช้)
+for (const f of walk('src', ['.css'])) {
+  read(f).split('\n').forEach((line, i) => {
+    const m = /^([^{]*)\{([^}]*)\}/.exec(line);
+    if (!m || !/\b(input|textarea|select)\b/.test(m[1])) return;
+    const fs = /font-size:\s*([^;]+)/.exec(m[2]);
+    if (!fs) return;
+    const v = fs[1].trim();
+    const px = /^(\d+(?:\.\d+)?)px$/.exec(v);
+    if ((px && Number(px[1]) < 16) || (!px && !/^max\(16px/.test(v) && !/^(inherit|1[6-9]px|[2-9]\dpx)/.test(v))) {
+      fail('CORE-08', `${f}:${i + 1} ช่องพิมพ์ตั้ง font-size: ${v} — iPhone/iPad จะซูมหน้าเอง ใช้ 16px ขึ้นไป หรือ max(16px, …)`);
+    }
+  });
+}
+
 // ---------- BUGS-13 เพื่อน: ตรวจ "แชท 1:1 ได้เฉพาะเพื่อน" ทั้งตอนเปิดห้องและตอนส่งทุกข้อความ ----------
 {
   const idx = read(join('worker', 'index.ts'));
@@ -289,10 +306,20 @@ for (const f of walk('worker', ['.ts'])) {
   }
 }
 
+// ---------- BUGS-21 หน้าแชทต้องล็อกความสูงเท่าส่วนที่มองเห็น (เจอ 2026-11-18 บน iPad) ----------
+{
+  const page = read(join('src', 'pages', 'ChatRoomPage.tsx'));
+  if (!/useEffect\(\(\) => lockChatViewport\(\), \[\]\)/.test(page)) fail('BUGS-21', 'ChatRoomPage ต้องเรียก lockChatViewport() (ไม่งั้นคีย์บอร์ด iPad/iPhone ดันช่องพิมพ์ไปค้างบนสุด)');
+  const css = read(join('src', 'styles.css'));
+  if (!/html\.chat-open #root \{ height: var\(--app-h/.test(css)) fail('BUGS-21', 'styles.css ต้องมี html.chat-open #root { height: var(--app-h, …) }');
+  const main = read(join('src', 'main.tsx'));
+  if (!/installViewportFix\(\);/.test(main)) fail('BUGS-21', 'main.tsx ต้องเรียก installViewportFix()');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..07, BUGS-01..20)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..21)');

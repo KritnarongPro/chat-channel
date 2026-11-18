@@ -98,6 +98,12 @@ input, textarea { width: 100%; padding: 10px 12px; border: 1px solid var(--borde
 
 /* ---------- ห้องแชท ---------- */
 .chat-page { height: 100%; }
+/* หน้าแชท (2026-11-18): สูงเท่าส่วนที่มองเห็นจริง (--app-h จาก visualViewport — viewport.ts) ไม่ให้ทั้งหน้าเลื่อน
+   → คีย์บอร์ดขึ้น ช่องพิมพ์อยู่เหนือคีย์บอร์ดพอดี · คีย์บอร์ดหาย หน้ากลับเต็มจอ */
+html.chat-open, html.chat-open body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+html.chat-open #root { height: var(--app-h, 100dvh); overflow: hidden; }
+html.chat-open .chat-page { height: 100%; min-height: 0; }
+html.chat-open .messages { overscroll-behavior: contain; }
 .messages { flex: 1; overflow-y: auto; padding: 10px 10px 4px; background: var(--bg); }
 .date-sep { text-align: center; font-size: 12px; color: var(--muted); margin: 10px 0; }
 .bubble-row { display: flex; margin: 3px 0; }
@@ -208,7 +214,7 @@ select { font: inherit; width: 100%; padding: 9px 10px; border: 1px solid var(--
 .bubble-row.flash .bubble { outline: 3px solid #fbbf24; transition: outline .3s; }
 
 /* ---------- เฟส 5: สติกเกอร์ · โน้ต · เพื่อน · เมนู ---------- */
-.composer textarea { font-size: var(--chat-font); }
+.composer textarea { font-size: max(16px, var(--chat-font)); }  /* ต่ำกว่า 16px → iPhone/iPad ซูมหน้าเองตอนแตะ (2026-11-18) */
 .sticker-img { width: 140px; height: 140px; object-fit: contain; display: block; }
 .bubble-sticker { background: transparent !important; box-shadow: none !important; padding: 2px; }
 .sticker-picker { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); margin-bottom: 6px; }
