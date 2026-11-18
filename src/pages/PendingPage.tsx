@@ -7,6 +7,7 @@ import { FormEvent, useState } from 'react';
 import { api, errMsg } from '../api';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
+import { BrandLogo } from '../components';
 
 export default function PendingPage() {
   const { me, reload, logout } = useMe();
@@ -33,6 +34,7 @@ export default function PendingPage() {
 
   return (
     <div className="center">
+      <BrandLogo size="small" />
       <h2>สวัสดี {me.user.displayName}</h2>
       <p>บัญชีของคุณ <b>รอแอดมินอนุมัติ</b> — เมื่ออนุมัติแล้วกด "ตรวจอีกครั้ง"</p>
       <button className="btn" onClick={() => void reload()}>ตรวจอีกครั้ง</button>

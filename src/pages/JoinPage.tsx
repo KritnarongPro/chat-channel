@@ -10,6 +10,7 @@ import { thaiClock, thaiDate } from '../../shared/time';
 import { LOGIN_ERRORS, Me, api, errMsg } from '../api';
 import { escapeInAppBrowser } from '../pwa';
 import Loading from '../Loading';
+import { BrandLogo } from '../components';
 
 interface InviteInfo {
   valid: boolean; problem: string | null; problemCode: string | null;
@@ -62,6 +63,7 @@ export default function JoinPage({ me, reload }: { me: Me | null; reload: () => 
   const blocked = me ? null : escapeInAppBrowser();
   return (
     <div className="center join">
+      <BrandLogo size="small" />
       <div className="join-icon" aria-hidden="true">{info?.room?.type === 'channel' ? '📢' : '👥'}</div>
       {loadError && <p className="error-text" role="alert">{loadError}</p>}
       {!info && !loadError && <Loading variant="card" />}

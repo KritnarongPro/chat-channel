@@ -42,7 +42,7 @@ export default function SetupCard({ compact = false }: { compact?: boolean }) {
 
   async function install() {
     const r = await oneClickInstall();
-    if (r === 'accepted') notify('success', 'ติดตั้งแล้ว — เปิดแอปจากไอคอน "แชท" บนหน้าจอโฮมได้เลย');
+    if (r === 'accepted') notify('success', 'ติดตั้งแล้ว — เปิดแอปจากไอคอน "VELA CHAT" บนหน้าจอโฮมได้เลย');
     else if (r === 'dismissed') notify('warning', 'ยกเลิกการติดตั้ง — กดปุ่มอีกครั้งได้ทุกเมื่อ');
   }
 
@@ -127,7 +127,7 @@ export default function SetupCard({ compact = false }: { compact?: boolean }) {
         <div className="setup-step">
           <div><b>{needInstall ? '②' : '🔔'} เปิดแจ้งเตือน</b></div>
           {push === 'need-install' ? (
-            <p className="small">หลังติดตั้งแล้ว ให้เปิดแอปจากไอคอน "แชท" บนหน้าจอโฮม แล้วกดปุ่มเปิดแจ้งเตือนที่จะขึ้นตรงนี้</p>
+            <p className="small">หลังติดตั้งแล้ว ให้เปิดแอปจากไอคอน "VELA CHAT" บนหน้าจอโฮม แล้วกดปุ่มเปิดแจ้งเตือนที่จะขึ้นตรงนี้</p>
           ) : push === 'denied' ? (
             <p className="small error-text">เครื่องนี้ปิดสิทธิ์แจ้งเตือนของเว็บนี้ไว้ — เปิดได้ที่การตั้งค่า{isIOS ? ' → แจ้งเตือน → แชท' : 'ของเบราว์เซอร์ → การแจ้งเตือน'} แล้วกลับมาที่นี่</p>
           ) : (
@@ -146,7 +146,7 @@ export default function SetupCard({ compact = false }: { compact?: boolean }) {
             <ol className="guide-steps">
               <li>แตะปุ่ม <b>แชร์</b> <span className="share-icon" aria-hidden="true">⬆︎</span> ของ Safari<br /><span className="small muted">อยู่แถบล่างของจอ — ถ้าไม่เห็น แตะ <b>⋯</b> ก่อน</span></li>
               <li>เลื่อนหา แล้วแตะ <b>"เพิ่มไปยังหน้าจอโฮม"</b> → <b>เพิ่ม</b></li>
-              <li>เปิดแอปจากไอคอน <b>"แชท"</b> บนหน้าจอโฮม แล้วกด <b>เปิดแจ้งเตือน</b></li>
+              <li>เปิดแอปจากไอคอน <b>"VELA CHAT"</b> บนหน้าจอโฮม แล้วกด <b>เปิดแจ้งเตือน</b></li>
             </ol>
             <p className="small muted">Apple ไม่อนุญาตให้เว็บติดตั้งตัวเองได้ จึงต้องทำ 2 ขั้นนี้ด้วยมือ (ทำครั้งเดียว)</p>
             <div className="guide-arrow" aria-hidden="true">⬇︎</div>

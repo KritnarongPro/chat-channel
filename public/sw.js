@@ -24,7 +24,7 @@ self.addEventListener('fetch', (event) => {
 const pendingCount = new Map();
 
 self.addEventListener('push', (event) => {
-  let data = { title: 'แชทส่วนตัว', body: 'มีข้อความใหม่', url: '/', tag: 'chat' };
+  let data = { title: 'VELA CHAT', body: 'มีข้อความใหม่', url: '/', tag: 'chat' };
   try {
     if (event.data) data = { ...data, ...event.data.json() };
   } catch (err) {
