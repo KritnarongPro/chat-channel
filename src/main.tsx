@@ -11,7 +11,8 @@ import { NoticeProvider } from './notice';
 import { MeContext } from './me';
 import LoginPage from './pages/LoginPage';
 import PendingPage from './pages/PendingPage';
-import ChatListPage from './pages/ChatListPage';
+import AppShell, { HomeRoute } from './AppShell';
+import MenuPage from './pages/MenuPage';
 import NewChatPage from './pages/NewChatPage';
 import ChatRoomPage from './pages/ChatRoomPage';
 import AdminPage from './pages/AdminPage';
@@ -117,7 +118,10 @@ function App() {
         <InAppNotifier />
         <PrefsLoader />
         <Routes>
-          <Route index element={<ChatListPage />} />
+          {/* 2026-11-18: มือถือ = แถบเมนูล่าง · iPad/จอกว้าง = 2 ช่อง (AppShell.tsx) */}
+          <Route element={<AppShell />}>
+          <Route index element={<HomeRoute />} />
+          <Route path="menu" element={<MenuPage />} />
           <Route path="new" element={<NewChatPage />} />
           <Route path="room/:id" element={<ChatRoomPage />} />
           <Route path="channels" element={<ChannelsPage />} />
@@ -136,6 +140,7 @@ function App() {
           <Route path="admin/forms" element={me.user.role === 'admin' ? <AdminFormsPage /> : <Navigate to="/" replace />} />
           <Route path="admin" element={me.user.role === 'admin' ? <AdminPage /> : <Navigate to="/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
         </Routes>
         </>
       )}

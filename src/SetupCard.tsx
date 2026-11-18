@@ -1,9 +1,11 @@
 // =====================================================================
 // SetupCard.tsx — การ์ดบนหน้ารายการแชท: ติดตั้งแอป + เปิดแจ้งเตือน
 // แสดงเฉพาะขั้นที่ยังไม่ได้ทำ · ทำครบแล้วซ่อนเอง
+// 2026-11-18 (ผู้ใช้เลือก): หน้ารายการแชทใช้แบบ compact = แถบบาง 1 บรรทัด แตะเพื่อดูขั้นตอนเต็ม
+//   ✕ = ซ่อน 7 วัน (จำในเครื่อง) · หน้า ตั้งค่าแจ้งเตือน ยังแสดงการ์ดเต็มเสมอ
 // =====================================================================
 
-import { useCallback, useEffect, useState } from 'react';
+import { ReactElement, useCallback, useEffect, useState } from 'react';
 import { api, errMsg } from './api';
 import { useNotify } from './notice';
 import {
@@ -11,8 +13,22 @@ import {
   onPwaChange, oneClickInstall, openInExternalBrowser,
 } from './pwa';
 
-export default function SetupCard() {
+const HIDE_KEY = 'setup-bar-hidden-until';
+const HIDE_DAYS = 7;
+
+function hiddenUntil(): number {
+  try {
+    return Number(localStorage.getItem(HIDE_KEY)) || 0;
+  } catch (e) {
+    console.warn('อ่านค่าซ่อนแถบติดตั้งไม่ได้ — แสดงแถบตามปกติ', e);
+    return 0;
+  }
+}
+
+export default function SetupCard({ compact = false }: { compact?: boolean }) {
   const notify = useNotify();
+  const [open, setOpen] = useState(false);
+  const [hidden, setHidden] = useState(() => compact && hiddenUntil() > Date.now());
   const [push, setPush] = useState<PushState | null>(null);
   const [oneClick, setOneClick] = useState(canOneClickInstall());
   const [showIosGuide, setShowIosGuide] = useState(false);
@@ -45,8 +61,37 @@ export default function SetupCard() {
   }
 
   // ---------- เปิดจากในแอป LINE / Facebook: ติดตั้งและแจ้งเตือนไม่ได้ ต้องออกไปเบราว์เซอร์ก่อน ----------
-  if (inLineApp || inOtherInApp) {
+  function hide() {
+    try {
+      localStorage.setItem(HIDE_KEY, String(Date.now() + HIDE_DAYS * 86_400_000));
+      notify('success', `ซ่อนแถบนี้ ${HIDE_DAYS} วัน — ทำต่อได้ที่ เมนู → ตั้งค่าแจ้งเตือน / ติดตั้งแอป`);
+    } catch (e) {
+      notify('warning', `จำการซ่อนไว้ในเครื่องไม่ได้ (${errMsg(e)}) — ซ่อนแค่ตอนนี้ เปิดแอปใหม่จะเห็นอีก`);
+    }
+    setHidden(true);
+  }
+
+  /** compact: แถบบาง 1 บรรทัด → แตะเปิดการ์ดเต็มในแผ่นล่าง */
+  function bar(label: string, card: ReactElement) {
+    if (hidden) return null;
     return (
+      <div className="setup-bar">
+        <button className="setup-bar-main" onClick={() => setOpen(true)}><span className="setup-bar-text">{label}</span><span className="setup-bar-go">ดูวิธี ›</span></button>
+        <button className="setup-bar-x" onClick={hide} aria-label={`ซ่อนแถบนี้ ${HIDE_DAYS} วัน`} title={`ซ่อน ${HIDE_DAYS} วัน`}>✕</button>
+        {open && (
+          <div className="sheet-backdrop" onClick={() => setOpen(false)}>
+            <div className="sheet" onClick={(e) => e.stopPropagation()}>
+              <div className="sheet-head"><b>ติดตั้งแอป / แจ้งเตือน</b><button className="link" onClick={() => setOpen(false)}>ปิด</button></div>
+              {card}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (inLineApp || inOtherInApp) {
+    const card = (
       <div className="setup-card">
         <b>เปิดอยู่ในแอป{inLineApp ? ' LINE' : 'อื่น'}</b>
         <p className="small">ติดตั้งแอปและรับแจ้งเตือนได้เฉพาะใน {isIOS ? 'Safari' : 'Chrome'} — ต้องเข้าสู่ระบบอีกครั้งหลังเปิด</p>
@@ -57,13 +102,14 @@ export default function SetupCard() {
         )}
       </div>
     );
+    return compact ? bar(`⚠️ เปิดในแอป${inLineApp ? ' LINE' : 'อื่น'} — ไม่ได้รับแจ้งเตือน`, card) : card;
   }
 
   const needInstall = !standalone;
   const needPush = push === 'off' || push === 'need-install' || push === 'denied';
   if (push === null || (!needInstall && !needPush)) return null;
 
-  return (
+  const card = (
     <div className="setup-card">
       {needInstall && (
         <div className="setup-step">
@@ -108,5 +154,12 @@ export default function SetupCard() {
         </div>
       )}
     </div>
+  );
+  if (!compact) return card;
+  return bar(
+    needInstall ? '📲 ติดตั้งแอป + เปิดแจ้งเตือน'
+    : push === 'denied' ? '🔔 เครื่องนี้ปิดแจ้งเตือนไว้'
+    : '🔔 ยังไม่ได้เปิดแจ้งเตือน',
+    card,
   );
 }
