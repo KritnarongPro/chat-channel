@@ -27,6 +27,7 @@ import { useNotify } from '../notice';
 import { OutgoingFile, useRoomSocket } from '../useRoomSocket';
 import MessageContent from '../MessageContent';
 import Loading from '../Loading';
+import { lockChatViewport } from '../viewport';
 import VoiceRecorder from '../VoiceRecorder';
 import InvitePanel from '../InvitePanel';
 import { formatDuration, formatSize, prepareImage, prepareVideo } from '../media';
@@ -67,6 +68,8 @@ export default function ChatRoomPage() {
   const [reactionsFor, setReactionsFor] = useState<ChatMessage | null>(null);
   const pressTimer = useRef<number | undefined>(undefined);
   // ---------- ชุด 2 ----------
+  // iPad/iPhone: ล็อกความสูงหน้าแชทเท่าส่วนที่มองเห็น กันช่องพิมพ์ลอยไปบนสุด (viewport.ts)
+  useEffect(() => lockChatViewport(), []);
   const [showPoll, setShowPoll] = useState(false);
   const [showPins, setShowPins] = useState(false);
 
