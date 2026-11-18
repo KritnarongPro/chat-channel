@@ -275,7 +275,10 @@ for (const f of walk('src', ['.css'])) {
   const sf = lp.slice(lp.indexOf('async function safeFetch'), lp.indexOf('async function readLimited'));
   if (!/for \(let hop/.test(sf) || !/unsafeUrlReason\(current\)/.test(sf)) fail('BUGS-18', 'safeFetch ต้องตรวจ unsafeUrlReason ทุกครั้งที่ redirect (ในลูป hop)');
   if (!/redirect: 'manual'/.test(sf)) fail('BUGS-18', "safeFetch ต้องใช้ redirect: 'manual' (ไม่ให้ fetch ตามไปเองโดยไม่ตรวจ)");
-  const img = lp.slice(lp.indexOf('export async function linkPreviewImage'));
+  // ตรวจเฉพาะตัวฟังก์ชัน linkPreviewImage (จบที่หัวหมวดถัดไป — ส่วนไอคอนของลิงก์กลุ่มต่อท้ายไฟล์ fetch ลิงก์ไอคอนที่อ่านจากหน้าเว็บ ซึ่งตั้งใจ)
+  const imgStart = lp.indexOf('export async function linkPreviewImage');
+  const imgEnd = lp.indexOf('\n// =====', imgStart);
+  const img = lp.slice(imgStart, imgEnd > 0 ? imgEnd : undefined);
   if (!/SELECT image_url FROM link_previews/.test(img) || /safeFetch\(url/.test(img)) fail('BUGS-18', 'linkPreviewImage ต้องเปิดเฉพาะรูปที่บันทึกไว้ใน link_previews (ห้าม fetch url ที่ส่งมาตรง ๆ = กลายเป็น proxy)');
   const vote = room.slice(room.indexOf('private async handleVote'), room.indexOf('private async handlePollClose'));
   if (!/checkPoster\(/.test(vote)) fail('BUGS-18', 'handleVote ต้องเรียก checkPoster (สมาชิกที่ถูกเอาออกระหว่างเปิดห้องค้างต้องโหวตไม่ได้)');
@@ -354,10 +357,30 @@ for (const f of walk('src', ['.css'])) {
   if (idx.split('\n').some((l) => /room\.cleared_seq \?\? 0/.test(l) && !l.includes('const clearedOf'))) fail('BUGS-24', 'ใช้ clearedOf(room) แทน room.cleared_seq ?? 0 (ค่า -1 ต้องถือเป็น 0 ตอนกรองข้อความ)');
 }
 
+// ---------- BUGS-25 ลิงก์ของกลุ่ม: กดแล้วต้องไม่รันสคริปต์ + จัดการได้เฉพาะเจ้าของ/แอดมินห้อง (กันไว้ก่อน — 2026-11-18) ----------
+{
+  const rl = read(join('worker', 'room-links.ts'));
+  if (!/u\.protocol !== 'http:' && u\.protocol !== 'https:'/.test(rl)) fail('BUGS-25', "cleanLinkUrl ต้องรับเฉพาะ http/https (กัน javascript:/data: ที่กดแล้วรันสคริปต์บนโดเมนเรา)");
+  if (!/WHERE \(SELECT COUNT\(\*\) FROM room_links WHERE room_id = \?2\) < \?12/.test(rl)) fail('BUGS-25', 'createLink ต้องจองที่ในคำสั่งเดียว (COUNT < ?12) กันกดพร้อมกันเกิน 50 ลิงก์/8 หมุด');
+  const idx = read(join('worker', 'index.ts'));
+  const lr = idx.slice(idx.indexOf('async function linkRoom'), idx.indexOf('async function linkRoom') + 900);
+  if (!/if \(needEditor && !canEdit\) throw/.test(lr)) fail('BUGS-25', 'linkRoom ต้องตรวจสิทธิ์เจ้าของ/แอดมินห้องที่เซิร์ฟเวอร์ (หน้าเว็บแค่ซ่อนปุ่ม)');
+  for (const name of ['addRoomLink', 'editRoomLink', 'removeRoomLink', 'uploadRoomLinkIcon']) {
+    const body = idx.slice(idx.indexOf(`async function ${name}`), idx.indexOf(`async function ${name}`) + 200);
+    if (!/await linkRoom\(c, true\)/.test(body)) fail('BUGS-25', `${name} ต้องเรียก linkRoom(c, true) ก่อนแก้ข้อมูล`);
+  }
+  for (const f of [join('src', 'pages', 'RoomLinksPage.tsx'), join('src', 'pages', 'ChatRoomPage.tsx')]) {
+    const src = read(f);
+    for (const tag of src.match(/<a key=\{l\.id\}[^>]*>|<a href=\{l\.url\}[^>]*>/g) ?? []) {
+      if (!/rel="noopener noreferrer"/.test(tag)) fail('BUGS-25', `${f}: ลิงก์ที่เปิดแท็บใหม่ต้องมี rel="noopener noreferrer"`);
+    }
+  }
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..24)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..25)');

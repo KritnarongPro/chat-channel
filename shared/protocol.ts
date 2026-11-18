@@ -27,6 +27,21 @@ export const PICTURE_SIDE = 256;
 export const PICTURE_MAX_BYTES = 300 * 1024;
 export const PROFILE_NAME_MIN = 2;
 export const PROFILE_NAME_MAX = 40;
+
+// ---------- ลิงก์ของกลุ่ม/ชาเนล (2026-11-18) ----------
+export const ROOM_LINKS_MAX = 50;       // ต่อห้อง
+export const ROOM_LINKS_PINNED_MAX = 8; // แถบลิงก์ด่วนในห้อง
+export const LINK_TITLE_MAX = 60;
+export const LINK_CATEGORY_MAX = 30;
+/** สีพื้นไอคอนแบบอีโมจิ/ตัวอักษร (ชื่อ → สีจริงอยู่ใน styles.css .link-c-<ชื่อ>) */
+export const LINK_COLORS = ['blue', 'green', 'amber', 'red', 'purple', 'teal', 'pink', 'gray'] as const;
+export type LinkColor = typeof LINK_COLORS[number];
+export type LinkIconKind = 'auto' | 'upload' | 'emoji' | 'letter';
+export interface RoomLink {
+  id: string; title: string; url: string; category: string | null; pinned: boolean;
+  icon: { kind: LinkIconKind; pictureUrl: string | null; emoji: string | null; color: LinkColor };
+  createdBy: string; createdAt: string;
+}
 /** ชนิดเสียงที่รับ (ตัด ;codecs=... ออกก่อนเทียบ) */
 export const VOICE_MIMES = ['audio/mp4', 'audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/aac'];
 /** ชนิดวิดีโอที่รับ — .mov จาก iPhone (HEVC) Android บางรุ่นเล่นไม่ได้ → หน้าเว็บแสดงปุ่มดาวน์โหลดแทน */

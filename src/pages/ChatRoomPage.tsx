@@ -20,7 +20,7 @@ import { nowThai, thaiAfter, thaiClock, thaiDate, thaiShort } from '../../shared
 import { ALBUM_MAX, MAX_MESSAGE_CHARS, POLL_MAX_OPTIONS, POLL_OPTION_MAX, POLL_QUESTION_MAX, REACTIONS } from '../../shared/protocol';
 import StickerPicker from '../StickerPicker';
 import { ChatMessage, FormInfo, Room, RoomMember, RoomPin, User, api, errMsg, stickerUrl } from '../api';
-import type { MessageExtra, ReactionGroup, ReadState, ReplyRef } from '../../shared/protocol';
+import type { MessageExtra, ReactionGroup, ReadState, ReplyRef, RoomLink } from '../../shared/protocol';
 import { Avatar, TopBar } from '../components';
 import { useMe } from '../me';
 import { useNotify } from '../notice';
@@ -30,6 +30,7 @@ import Loading from '../Loading';
 import { lockChatViewport } from '../viewport';
 import { useSwipeReply } from '../gestures';
 import PictureCropper from '../PictureCropper';
+import LinkIcon from '../LinkIcon';
 import { MuteSheet, RoomMenu } from '../RoomActions';  // 2026-11-18: ใช้ร่วมกับหน้ารายการแชท
 import VoiceRecorder from '../VoiceRecorder';
 import InvitePanel from '../InvitePanel';
@@ -83,15 +84,30 @@ export default function ChatRoomPage() {
     textRef.current?.focus();
   }, () => clearTimeout(pressTimer.current));  // นิ้วขยับ = ไม่ใช่กดค้าง → ยกเลิกเปิดเมนู
 
+  // ---------- ลิงก์ของกลุ่ม (2026-11-18): แถบลิงก์ด่วน = ลิงก์ที่ปักไว้ · ซ่อนแถบได้ (จำในเครื่อง) ----------
+  const [links, setLinks] = useState<RoomLink[]>([]);
+  const [linksBarHidden, setLinksBarHidden] = useState(() => readFlag(`links-bar-hidden:${id}`));
+  function toggleLinksBar() {
+    const next = !linksBarHidden;
+    setLinksBarHidden(next);
+    if (!writeFlag(`links-bar-hidden:${id}`, next)) notify('warning', 'จำการตั้งค่านี้ในเครื่องไม่ได้ — มีผลแค่ตอนนี้ เปิดห้องใหม่จะกลับเป็นแบบเดิม');
+  }
+
   const loadRoom = useCallback(async () => {
     try {
       const d = await api.get<{ room: Room; members: RoomMember[] }>(`/api/rooms/${encodeURIComponent(id)}`);
       setRoom(d.room);
       setMembers(d.members);
+      if (d.room.type !== 'dm') {
+        // ลิงก์โหลดไม่ได้ไม่บังห้องแชท แต่แจ้งเหตุผล (เปิดหน้า "ลิงก์ของกลุ่ม" จะลองใหม่)
+        api.get<{ links: RoomLink[] }>(`/api/rooms/${encodeURIComponent(id)}/links`)
+          .then((x) => setLinks(x.links))
+          .catch((e) => notify('warning', `โหลดลิงก์ของกลุ่มไม่สำเร็จ: ${errMsg(e)}`));
+      }
     } catch (e) {
       setRoomError(errMsg(e));
     }
-  }, [id]);
+  }, [id, notify]);
   useEffect(() => { void loadRoom(); }, [loadRoom]);
   const s = useRoomSocket(id, onNotice, () => void loadRoom());
 
@@ -355,6 +371,20 @@ export default function ChatRoomPage() {
         )}
       />
       {connText && <div className={`banner ${s.conn === 'failed' ? 'banner-error' : 'banner-warning'}`} role="status">{connText}</div>}
+      {!linksBarHidden && links.some((l) => l.pinned) && (
+        <nav className="links-bar" aria-label="ลิงก์ด่วนของกลุ่ม">
+          {links.filter((l) => l.pinned).map((l) => (
+            <a key={l.id} href={l.url} target="_blank" rel="noopener noreferrer" className="links-bar-item" title={l.title}>
+              <LinkIcon icon={l.icon} title={l.title} size={40} />
+              <span>{l.title}</span>
+            </a>
+          ))}
+          <Link to={`/room/${encodeURIComponent(id)}/links`} className="links-bar-item" aria-label={`ลิงก์ทั้งหมด ${links.length} อัน`}>
+            <span className="link-icon links-bar-all" style={{ width: 40, height: 40 }} aria-hidden="true">⋯</span>
+            <span>ทั้งหมด {links.length}</span>
+          </Link>
+        </nav>
+      )}
       {pins.length > 0 && (
         <div className="pinned-bar">
           <button className="pinned-main" onClick={() => void jumpTo(pins[0].seq)}>
@@ -671,7 +701,10 @@ export default function ChatRoomPage() {
       )}
 
       {showRoomMenu && room && (
-        <RoomMenu room={room} members={members} onClose={() => setShowRoomMenu(false)} />
+        <RoomMenu room={room} members={members} onClose={() => setShowRoomMenu(false)}
+          links={room.type === 'dm' ? undefined : {
+            count: links.length, hasPinned: links.some((l) => l.pinned), barHidden: linksBarHidden, onToggleBar: toggleLinksBar,
+          }} />
       )}
 
       {showMute && room && (
@@ -1381,3 +1414,23 @@ function PinsSheet({ pins, canPin, onClose, onJump, onUnpin }: {
   );
 }
 
+// ---------------------------------------------------------------------
+// ค่าเปิด/ปิดที่จำในเครื่อง (localStorage อาจใช้ไม่ได้ในโหมดส่วนตัว/แอปในแอป → คืนค่าเริ่มต้น + แจ้งตอนบันทึก)
+// ---------------------------------------------------------------------
+function readFlag(key: string): boolean {
+  try {
+    return localStorage.getItem(key) === '1';
+  } catch (e) {
+    console.warn('อ่านค่าที่จำในเครื่องไม่ได้', key, e);
+    return false;
+  }
+}
+function writeFlag(key: string, on: boolean): boolean {
+  try {
+    if (on) localStorage.setItem(key, '1'); else localStorage.removeItem(key);
+    return true;
+  } catch (e) {
+    console.warn('บันทึกค่าในเครื่องไม่ได้', key, e);
+    return false;
+  }
+}

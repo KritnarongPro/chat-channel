@@ -34,6 +34,7 @@ import { lineCallback, lineConfigError, lineStart } from './auth-line';
 import { googleCallback, googleConfigError, googleStart } from './auth-google';
 import { InviteRow, inviteProblem, loadInvite, redeemInvite } from './invites';
 import { linkPreview, linkPreviewImage } from './link-preview';
+import { cleanLinkInput, createLink, deleteLink, listLinks, setLinkIcon, updateLink } from './room-links';
 import {
   adminResetPicture, dropPicture, getMyProfile, pictureUrl, readPicture, resetMyPicture, saveMyName, servePicture, storePicture,
   uploadMyPicture,
@@ -102,6 +103,13 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/rooms/:id/title',          need: 'active', handler: renameRoom },
   { method: 'POST', pattern: '/api/rooms/:id/picture',        need: 'active', handler: setRoomPicture },    // รูปกลุ่ม/ชาเนล (เจ้าของ/แอดมินห้อง)
   { method: 'POST', pattern: '/api/rooms/:id/picture/reset',  need: 'active', handler: resetRoomPicture },
+
+  // ---------- ลิงก์ของกลุ่ม/ชาเนล (2026-11-18 — worker/room-links.ts) · ดู = สมาชิก · จัดการ = เจ้าของ/แอดมินห้อง ----------
+  { method: 'GET',  pattern: '/api/rooms/:id/links',                 need: 'active', handler: getRoomLinks },
+  { method: 'POST', pattern: '/api/rooms/:id/links',                 need: 'active', handler: addRoomLink },
+  { method: 'POST', pattern: '/api/rooms/:id/links/:linkId',         need: 'active', handler: editRoomLink },
+  { method: 'POST', pattern: '/api/rooms/:id/links/:linkId/delete',  need: 'active', handler: removeRoomLink },
+  { method: 'POST', pattern: '/api/rooms/:id/links/:linkId/icon',    need: 'active', handler: uploadRoomLinkIcon },  // body = รูปที่ครอปแล้ว
 
   // ---------- notify: ตั้งค่าแจ้งเตือนรวม + การเชื่อมต่อของแอป (แจ้งเตือนในแอป) ----------
   { method: 'GET',  pattern: '/api/me/notify-settings',       need: 'active', handler: getNotifySettings },
@@ -794,6 +802,53 @@ async function setRoomPicture(c: Ctx) {
   await dropPicture(c.env, room.picture_id);
   const warning = await announceRoomChange(c, `🖼 ${c.user!.displayName} เปลี่ยนรูป${kindTh}`);
   return ok({ picture: pictureUrl(id), warning }, 201);
+}
+
+// ---------- ลิงก์ของกลุ่ม/ชาเนล (2026-11-18) ----------
+/** กลุ่ม/ชาเนลเท่านั้น · editor = เจ้าของ/แอดมินห้อง (ตรวจที่เซิร์ฟเวอร์ทุกครั้ง — หน้าเว็บแค่ซ่อนปุ่ม) */
+async function linkRoom(c: Ctx, needEditor: boolean) {
+  const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
+  if (room.type === 'dm') throw new ApiError(400, 'DM_NO_LINKS', 'ลิงก์ของกลุ่มใช้ได้เฉพาะกลุ่มและชาเนล');
+  const canEdit = role === 'owner' || role === 'admin';
+  const kindTh = room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม';
+  if (needEditor && !canEdit) throw new ApiError(403, 'NOT_ROOM_ADMIN', `เฉพาะเจ้าของ/แอดมิน${kindTh}เท่านั้นที่จัดการลิงก์ได้`);
+  return { room, canEdit, kindTh };
+}
+
+async function getRoomLinks(c: Ctx) {
+  const { canEdit } = await linkRoom(c, false);
+  return ok({ links: await listLinks(c.env, c.params.id), canEdit });
+}
+
+async function addRoomLink(c: Ctx) {
+  await linkRoom(c, true);
+  const inp = cleanLinkInput(await readJson<Record<string, unknown>>(c.req), false);
+  const r = await createLink(c.env, c.params.id, c.user!.id, inp);
+  // ผู้ใช้เลือก: แจ้งในห้องแบบเงียบเมื่อเพิ่มลิงก์ (แก้/ลบ = อัปเดตเงียบ ๆ ไม่มีข้อความ)
+  const announce = await announceRoomChange(c, `🔗 ${c.user!.displayName} เพิ่มลิงก์ "${r.link.title}"`);
+  return ok({ link: r.link, warning: [r.warning, announce].filter(Boolean).join(' · ') || null }, 201);
+}
+
+async function editRoomLink(c: Ctx) {
+  await linkRoom(c, true);
+  const inp = cleanLinkInput(await readJson<Record<string, unknown>>(c.req), true);
+  const r = await updateLink(c.env, c.params.id, c.params.linkId, inp);
+  await broadcastRoomUpdate(c.env, c.params.id);  // คนที่เปิดห้องอยู่เห็นลิงก์อัปเดต
+  return ok(r);
+}
+
+async function removeRoomLink(c: Ctx) {
+  await linkRoom(c, true);
+  const title = await deleteLink(c.env, c.params.id, c.params.linkId);
+  await broadcastRoomUpdate(c.env, c.params.id);  // คนที่เปิดห้องอยู่เห็นลิงก์อัปเดต
+  return ok({ deleted: title });
+}
+
+async function uploadRoomLinkIcon(c: Ctx) {
+  await linkRoom(c, true);
+  const link = await setLinkIcon(c.env, c.params.id, c.params.linkId, await readPicture(c.req));
+  await broadcastRoomUpdate(c.env, c.params.id);  // คนที่เปิดห้องอยู่เห็นลิงก์อัปเดต
+  return ok({ link });
 }
 
 async function resetRoomPicture(c: Ctx) {

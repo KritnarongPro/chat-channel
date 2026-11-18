@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0011_profile.sql
+-- ล่าสุดถึง: 0012_room_links.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -302,3 +302,23 @@ CREATE TABLE link_previews (
   fetched_at   TEXT NOT NULL,
   expires_at   TEXT NOT NULL
 );
+
+-- ---------- ลิงก์ของกลุ่ม/ชาเนล (0012) ----------
+-- เจ้าของ/แอดมินห้องจัดการ · สมาชิกดู/กด · pinned = 1 → แถบลิงก์ด่วนในห้อง (สูงสุด 8) · ทั้งหมดสูงสุด 50 ต่อห้อง
+-- icon_kind: auto/upload → icon_value = ไอดีรูปใน R2 pictures/<id> · emoji → อีโมจิ · letter → ตัวแรกของชื่อ
+CREATE TABLE room_links (
+  id          TEXT PRIMARY KEY,
+  room_id     TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  title       TEXT NOT NULL,
+  url         TEXT NOT NULL,
+  category    TEXT,
+  icon_kind   TEXT NOT NULL DEFAULT 'letter' CHECK (icon_kind IN ('auto', 'upload', 'emoji', 'letter')),
+  icon_value  TEXT,
+  color       TEXT,
+  pinned      INTEGER NOT NULL DEFAULT 0,
+  sort        INTEGER NOT NULL DEFAULT 0,
+  created_by  TEXT NOT NULL REFERENCES users(id),
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL
+);
+CREATE INDEX idx_room_links_room ON room_links(room_id, sort);

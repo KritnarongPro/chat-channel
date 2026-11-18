@@ -15,6 +15,8 @@ import { ApiError, Env, User, db, ok, readJson } from './lib';
 interface PCtx { req: Request; env: Env; params: Record<string, string>; user: User | null }
 
 export const pictureUrl = (id: string) => `/api/pictures/${id}`;
+/** ชนิดที่เปิดเป็นรูปได้ = รูปโปรไฟล์ + ไอคอน .ico ของลิงก์ (room-links.ts) — ไม่มี SVG/HTML */
+const SERVE_MIMES = [...PICTURE_MIMES, 'image/x-icon'];
 const r2Key = (id: string) => `pictures/${id}`;
 const ID_RE = /^[0-9a-f-]{36}$/;
 
@@ -87,7 +89,7 @@ export async function servePicture(c: PCtx) {
   const mime = obj.httpMetadata?.contentType ?? '';
   return new Response(obj.body, {
     headers: {
-      'Content-Type': PICTURE_MIMES.includes(mime) ? mime : 'application/octet-stream',
+      'Content-Type': SERVE_MIMES.includes(mime) ? mime : 'application/octet-stream',
       'X-Content-Type-Options': 'nosniff',
       'Cache-Control': 'private, max-age=31536000, immutable',  // เปลี่ยนรูป = ไอดีใหม่
     },
