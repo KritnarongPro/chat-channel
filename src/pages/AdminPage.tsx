@@ -11,7 +11,7 @@ import { useMe } from '../me';
 import { useNotify } from '../notice';
 import Loading from '../Loading';
 
-type AdminUser = User & { createdAt: string; loginVia: string[]; email: string | null };
+type AdminUser = User & { createdAt: string; loginVia: string[]; email: string | null; pictureCustom: boolean };
 const STATUS_TH: Record<User['status'], string> = { pending: 'รออนุมัติ', active: 'ใช้งานได้', blocked: 'ถูกระงับ' };
 
 export default function AdminPage() {
@@ -51,9 +51,24 @@ export default function AdminPage() {
     }
   }
 
+  // รูปไม่เหมาะสม (2026-11-18) → ลบรูปที่อัปเอง กลับเป็นรูปจาก Gmail
+  async function resetPicture(u: AdminUser) {
+    if (!confirm(`ลบรูปที่ ${u.displayName} อัปเอง แล้วกลับไปใช้รูปจาก Gmail?`)) return;
+    setBusyId(u.id);
+    try {
+      await api.post(`/api/admin/users/${encodeURIComponent(u.id)}/reset-picture`);
+      notify('success', `รีเซ็ตรูปของ ${u.displayName} แล้ว`);
+      await load();
+    } catch (e) {
+      notify('error', `รีเซ็ตรูปของ ${u.displayName} ไม่สำเร็จ: ${errMsg(e)}`);
+    } finally {
+      setBusyId('');
+    }
+  }
+
   return (
     <div className="page">
-      <TopBar title="แอดมิน: ผู้ใช้" back="/" />
+      <TopBar title="แอดมิน: ผู้ใช้" back="/menu" />
       <div className="chips">
         <Link className="chip" to="/admin/bots">🤖 บอท</Link>
         <Link className="chip" to="/admin/forms">📝 ฟอร์ม</Link>
@@ -75,7 +90,10 @@ export default function AdminPage() {
               <div className="small muted">เข้าด้วย {u.loginVia.join(' + ') || '—'}{u.email ? ` · ${u.email}` : ''}</div>
             </div>
             {u.id !== me.user.id && (
-              <div className="row-actions">
+              <div className="row-actions wrap">
+                {u.pictureCustom && (
+                  <button className="btn btn-small btn-ghost" disabled={busyId === u.id} onClick={() => void resetPicture(u)}>รีเซ็ตรูป</button>
+                )}
                 {u.status !== 'active' && (
                   <button className="btn btn-small" disabled={busyId === u.id} onClick={() => void setStatus(u, 'active')}>อนุมัติ</button>
                 )}

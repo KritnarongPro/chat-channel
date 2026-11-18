@@ -139,8 +139,14 @@ export async function lineCallback(req: Request, env: Env): Promise<Response> {
     if (existing) {
       if (existing.status === 'blocked') return backToApp(env, 'BLOCKED');
       status = existing.status as typeof status;
-      await env.DB.prepare(`UPDATE users SET display_name = ?, picture_url = ?, updated_at = ? WHERE id = ?`)
-        .bind(name, profile.picture ?? null, now, existing.id).run();
+      // 0011 (BUGS-23): ชื่อ/รูปที่ผู้ใช้ตั้งเองห้ามถูก LINE เขียนทับ — เก็บของ LINE ไว้ใน oauth_* แทน
+      await env.DB.prepare(
+        `UPDATE users SET oauth_name = ?1, oauth_picture = ?2,
+                display_name = CASE WHEN name_custom = 1 THEN display_name ELSE ?1 END,
+                picture_url = CASE WHEN picture_id IS NOT NULL THEN picture_url ELSE ?2 END,
+                updated_at = ?3
+         WHERE id = ?4`,
+      ).bind(name, profile.picture ?? null, now, existing.id).run();
       userId = existing.id;
     } else {
       // เลิกรับสมัครใหม่ด้วย LINE — สมัครใหม่ใช้ Gmail (ไม่สร้างบัญชีค้าง)

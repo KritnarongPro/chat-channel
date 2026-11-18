@@ -14,13 +14,15 @@ export default function MenuPage() {
   return (
     <div className="page">
       <TopBar title="เมนู" />
-      <div className="menu-profile">
+      {/* 2026-11-18: แตะเพื่อเปลี่ยนรูป/ชื่อ (ProfilePage) */}
+      <Link to="/profile" className="menu-profile plain-link" aria-label="แก้ไขโปรไฟล์ (รูป / ชื่อ)">
         <Avatar name={me.user.displayName} url={me.user.pictureUrl} size={52} />
         <div className="grow">
           <b className="ellipsis">{me.user.displayName}</b>
           <div className="small muted">{me.user.role === 'admin' ? 'แอดมินระบบ' : 'สมาชิก'}</div>
         </div>
-      </div>
+        <span className="link-ish">แก้ไข ›</span>
+      </Link>
       <ul className="menu-list menu-page">
         <li><Link to="/notes">🗒 โน้ตของฉัน (Keep)</Link></li>
         <li><Link to="/appearance">🎨 หน้าตาแอป (ธีม / ตัวอักษร)</Link></li>

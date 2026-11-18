@@ -29,6 +29,7 @@ import MessageContent from '../MessageContent';
 import Loading from '../Loading';
 import { lockChatViewport } from '../viewport';
 import { useSwipeReply } from '../gestures';
+import PictureCropper from '../PictureCropper';
 import VoiceRecorder from '../VoiceRecorder';
 import InvitePanel from '../InvitePanel';
 import { formatDuration, formatSize, prepareImage, prepareVideo } from '../media';
@@ -302,6 +303,9 @@ export default function ChatRoomPage() {
     return out;
   }
   const isRoomAdmin = !!room && (room.myRole === 'owner' || room.myRole === 'admin');
+  // ชื่อบนบับเบิล = ชื่อปัจจุบันของสมาชิก (เปลี่ยนชื่อแล้วข้อความเก่าเปลี่ยนตาม — 2026-11-18) · ออกจากห้องไปแล้ว → ชื่อตอนส่ง
+  const currentNames = new Map(members.map((x) => [x.id, x.displayName]));
+  const nameOf = (msg: ChatMessage) => currentNames.get(msg.senderId) ?? msg.senderName;
 
   // ---------- กดค้าง (มือถือ) / คลิกขวา (คอม) ที่ข้อความ = เปิดเมนู ----------
   function pressStart(m: ChatMessage, el: Element) {
@@ -379,7 +383,7 @@ export default function ChatRoomPage() {
                 {showDate && <div className="date-sep">{d}</div>}
                 <div className={`bubble-row ${mine ? 'mine' : ''}`}>
                   <div className="bubble bubble-album">
-                    {!mine && isGroup && <div className="bubble-name">{first.senderName}</div>}
+                    {!mine && isGroup && <div className="bubble-name">{nameOf(first)}</div>}
                     {first.extra?.forwardedFrom && <div className="forwarded">↪️ ส่งต่อจาก {first.extra.forwardedFrom}</div>}
                     <div className={`album-grid n${Math.min(ms.length, 4)}`}>
                       {ms.map((m) => (
@@ -431,7 +435,7 @@ export default function ChatRoomPage() {
                   onTouchEnd={() => { pressEnd(); swipe.end(); }}
                   onTouchCancel={() => { pressEnd(); swipe.end(); }}
                 >
-                  {!mine && isGroup && <div className="bubble-name">{m.senderName}</div>}
+                  {!mine && isGroup && <div className="bubble-name">{nameOf(m)}</div>}
                   {!m.deleted && m.extra?.forwardedFrom && <div className="forwarded">↪️ ส่งต่อจาก {m.extra.forwardedFrom}</div>}
                   {m.deleted ? (
                     <div className="bubble-deleted">{m.deleted.by === 'admin' ? '🚫 ข้อความถูกลบโดยแอดมิน' : '🚫 ข้อความถูกยกเลิก'}</div>
@@ -942,6 +946,27 @@ function MembersPanel({ room, members, onClose, onChanged }: {
   const [newTitle, setNewTitle] = useState(room.title);
   const [savingTitle, setSavingTitle] = useState(false);
   const kindTh = room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม';
+  // ---------- รูปกลุ่ม/ชาเนล (2026-11-18 — เจ้าของ/แอดมินห้อง · ครอปวงกลมเหมือนรูปโปรไฟล์) ----------
+  const [picFile, setPicFile] = useState<File | null>(null);
+  const [savingPic, setSavingPic] = useState(false);
+  const picInput = useRef<HTMLInputElement>(null);
+
+  async function savePicture(blob: Blob | null) {
+    setSavingPic(true);
+    try {
+      const r = blob
+        ? await api.raw<{ warning: string | null }>(`/api/rooms/${encodeURIComponent(room.id)}/picture`, blob, 'image/jpeg')
+        : await api.post<{ warning: string | null }>(`/api/rooms/${encodeURIComponent(room.id)}/picture/reset`);
+      notify('success', blob ? `เปลี่ยนรูป${kindTh}แล้ว` : `ลบรูป${kindTh}แล้ว`);
+      if (r.warning) notify('warning', r.warning);
+      setPicFile(null);
+      onChanged();
+    } catch (e) {
+      notify('error', `${blob ? 'เปลี่ยน' : 'ลบ'}รูป${kindTh}ไม่สำเร็จ: ${errMsg(e)}`);
+    } finally {
+      setSavingPic(false);
+    }
+  }
 
   async function saveTitle() {
     const t = newTitle.trim();
@@ -1039,6 +1064,25 @@ function MembersPanel({ room, members, onClose, onChanged }: {
         )}
         {!adding ? (
           <>
+            <div className="room-pic-row">
+              <Avatar name={room.title} url={room.picture} size={64} />
+              {canAdd && (
+                <div className="seg">
+                  <button className="btn btn-small" disabled={savingPic} onClick={() => picInput.current?.click()}>
+                    🖼 {room.picture ? `เปลี่ยนรูป${kindTh}` : `ใส่รูป${kindTh}`}
+                  </button>
+                  {room.picture && (
+                    <button className="btn btn-small btn-ghost" disabled={savingPic}
+                      onClick={() => { if (confirm(`ลบรูป${kindTh}?`)) void savePicture(null); }}>ลบรูป</button>
+                  )}
+                  <input ref={picInput} type="file" accept="image/*" hidden
+                    onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) setPicFile(f); }} />
+                </div>
+              )}
+            </div>
+            {picFile && (
+              <PictureCropper file={picFile} title={`รูป${kindTh}`} busy={savingPic} onCancel={() => setPicFile(null)} onDone={(b) => void savePicture(b)} />
+            )}
             {room.description && <p className="small">{room.description}</p>}
             <ul className="user-list">
               {members.map((m) => (

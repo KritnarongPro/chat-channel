@@ -130,9 +130,15 @@ export async function googleCallback(req: Request, env: Env): Promise<Response> 
     if (existing) {
       if (existing.status === 'blocked') return backToApp(env, CLEAR, 'BLOCKED');
       // ชื่อ/รูป: บัญชีที่มี LINE ด้วยใช้ของ LINE เป็นหลัก · สมัครด้วย Google อย่างเดียว → อัปเดตจาก Google
+      // 0011 (BUGS-23): เก็บของ Google ไว้ใน oauth_* เสมอ · ทับค่าที่แสดงเฉพาะเมื่อผู้ใช้ไม่ได้ตั้งชื่อ/อัปรูปเอง
       if (existing.line_user_id.startsWith('google:')) {
-        await env.DB.prepare(`UPDATE users SET display_name = ?, picture_url = ?, email = ?, updated_at = ? WHERE id = ?`)
-          .bind((c.name || email.split('@')[0]).slice(0, 80), c.picture ?? null, email, now, existing.id).run();
+        await env.DB.prepare(
+          `UPDATE users SET oauth_name = ?1, oauth_picture = ?2,
+                  display_name = CASE WHEN name_custom = 1 THEN display_name ELSE ?1 END,
+                  picture_url = CASE WHEN picture_id IS NOT NULL THEN picture_url ELSE ?2 END,
+                  email = ?3, updated_at = ?4
+           WHERE id = ?5`,
+        ).bind((c.name || email.split('@')[0]).slice(0, 80), c.picture ?? null, email, now, existing.id).run();
       } else {
         await env.DB.prepare(`UPDATE users SET email = ?, updated_at = ? WHERE id = ?`).bind(email, now, existing.id).run();
       }
@@ -140,9 +146,9 @@ export async function googleCallback(req: Request, env: Env): Promise<Response> 
     } else {
       const id = newId();
       await env.DB.prepare(
-        `INSERT INTO users (id, line_user_id, google_sub, email, display_name, picture_url, status, role, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', 'member', ?, ?)`,
-      ).bind(id, `google:${c.sub}`, c.sub, email, (c.name || email.split('@')[0]).slice(0, 80), c.picture ?? null, now, now).run();
+        `INSERT INTO users (id, line_user_id, google_sub, email, display_name, picture_url, oauth_name, oauth_picture, status, role, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?5, ?6, 'pending', 'member', ?7, ?7)`,
+      ).bind(id, `google:${c.sub}`, c.sub, email, (c.name || email.split('@')[0]).slice(0, 80), c.picture ?? null, now).run();
       user = { id, status: 'pending' };
       isNew = true;
     }
