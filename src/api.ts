@@ -101,6 +101,12 @@ export interface User {
   canChat?: boolean;                                      // เฟส 5: ทักแชท/เพิ่มเข้ากลุ่มได้เลย (เพื่อน หรือ แอดมิน/บอท)
 }
 
+/** โปรไฟล์ของฉัน (2026-11-18) — nameCustom/pictureCustom = ตั้งเอง (ล็อกอินไม่ทับ) · oauth* = ของ Gmail */
+export interface MyProfile {
+  displayName: string; pictureUrl: string | null; nameCustom: boolean; pictureCustom: boolean;
+  oauthName: string | null; oauthPicture: string | null;
+}
+
 export interface Me { user: User; appName: string; hasAdmin: boolean; needsGoogle: boolean }  // needsGoogle: ยังไม่ผูก Gmail → บังคับผูก
 
 export interface Room {

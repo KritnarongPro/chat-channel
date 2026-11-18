@@ -34,6 +34,10 @@ import { lineCallback, lineConfigError, lineStart } from './auth-line';
 import { googleCallback, googleConfigError, googleStart } from './auth-google';
 import { InviteRow, inviteProblem, loadInvite, redeemInvite } from './invites';
 import { linkPreview, linkPreviewImage } from './link-preview';
+import {
+  adminResetPicture, dropPicture, getMyProfile, pictureUrl, readPicture, resetMyPicture, saveMyName, servePicture, storePicture,
+  uploadMyPicture,
+} from './profile';
 
 export { ChatRoom } from './room';
 export { UserHub } from './hub';
@@ -73,6 +77,14 @@ const routes: Route[] = [
   { method: 'GET',  pattern: '/api/admin/users',              need: 'admin',  handler: adminListUsers },
   { method: 'GET',  pattern: '/api/admin/pending-count',      need: 'admin',  handler: adminPendingCount },  // ตัวเลขรออนุมัติบนเมนู ☰
   { method: 'POST', pattern: '/api/admin/users/:id/status',   need: 'admin',  handler: adminSetStatus },
+  { method: 'POST', pattern: '/api/admin/users/:id/reset-picture', need: 'admin', handler: adminResetPicture },  // รูปไม่เหมาะสม → กลับเป็นรูปจาก Gmail
+
+  // ---------- โปรไฟล์: รูป / ชื่อที่แสดง (2026-11-18 — worker/profile.ts) ----------
+  { method: 'GET',  pattern: '/api/me/profile',               need: 'active', handler: getMyProfile },
+  { method: 'POST', pattern: '/api/me/name',                  need: 'active', handler: saveMyName },        // { name } · null = ใช้ชื่อจาก Gmail
+  { method: 'POST', pattern: '/api/me/picture',               need: 'active', handler: uploadMyPicture },   // body = รูปที่ครอปแล้ว
+  { method: 'POST', pattern: '/api/me/picture/reset',         need: 'active', handler: resetMyPicture },
+  { method: 'GET',  pattern: '/api/pictures/:pictureId',      need: 'active', handler: servePicture },      // รูปโปรไฟล์ + รูปกลุ่ม
 
   // ---------- users: รายชื่อสำหรับเริ่มแชท ----------
   { method: 'GET',  pattern: '/api/users',                    need: 'active', handler: listUsers },
@@ -87,6 +99,8 @@ const routes: Route[] = [
   { method: 'POST', pattern: '/api/rooms/:id/pin',            need: 'active', handler: pinMessage },    // ปักหมุด/ประกาศ (สูงสุด 5)
   { method: 'POST', pattern: '/api/rooms/:id/unpin',          need: 'active', handler: unpinMessage },
   { method: 'POST', pattern: '/api/rooms/:id/title',          need: 'active', handler: renameRoom },
+  { method: 'POST', pattern: '/api/rooms/:id/picture',        need: 'active', handler: setRoomPicture },    // รูปกลุ่ม/ชาเนล (เจ้าของ/แอดมินห้อง)
+  { method: 'POST', pattern: '/api/rooms/:id/picture/reset',  need: 'active', handler: resetRoomPicture },
 
   // ---------- notify: ตั้งค่าแจ้งเตือนรวม + การเชื่อมต่อของแอป (แจ้งเตือนในแอป) ----------
   { method: 'GET',  pattern: '/api/me/notify-settings',       need: 'active', handler: getNotifySettings },
@@ -338,7 +352,7 @@ async function adminListUsers(c: Ctx) {
     (status
       ? c.env.DB.prepare(`SELECT * FROM users WHERE status = ? AND is_bot = 0 ORDER BY created_at DESC`).bind(status)
       : c.env.DB.prepare(`SELECT * FROM users WHERE is_bot = 0 ORDER BY status = 'pending' DESC, created_at DESC`)
-    ).all<Parameters<typeof userOut>[0] & { created_at: string; line_user_id: string; google_sub: string | null; email: string | null }>(),
+    ).all<Parameters<typeof userOut>[0] & { created_at: string; line_user_id: string; google_sub: string | null; email: string | null; picture_id: string | null }>(),
   );
   return ok({
     users: rows.results.map((r) => ({
@@ -346,6 +360,7 @@ async function adminListUsers(c: Ctx) {
       // ให้แอดมินรู้ว่าสมัครมาทางไหน (อนุมัติถูกคน) · อีเมลแสดงเฉพาะหน้าแอดมิน
       loginVia: [r.line_user_id.startsWith('google:') ? null : 'LINE', r.google_sub ? 'Google' : null].filter(Boolean),
       email: r.email,
+      pictureCustom: !!r.picture_id,  // 0011: อัปรูปเอง → แอดมินกด "รีเซ็ตรูป" ได้
     })),
   });
 }
@@ -399,6 +414,7 @@ type RoomListRow = {
   visibility: 'public' | 'private' | null; description: string | null; muted: number; muted_until: string | null;
   pinned_seq: number | null; pinned_text: string | null; pinned_sender: string | null; pinned_at: string | null;
   cleared_seq: number | null;  // 0009: ล้างแชทฝั่งฉันถึงลำดับนี้
+  picture_id: string | null;   // 0011: รูปกลุ่ม/ชาเนล
 };
 
 async function listRooms(c: Ctx) {
@@ -406,7 +422,7 @@ async function listRooms(c: Ctx) {
     c.env.DB.prepare(
       `SELECT r.id, r.type, r.title, r.last_seq, r.last_message_at, r.last_message_preview, r.last_sender_name,
               r.created_at, r.visibility, r.description, m.last_read_seq, m.role AS my_role, m.muted, m.muted_until,
-              r.pinned_seq, r.pinned_text, r.pinned_sender, r.pinned_at, m.cleared_seq,
+              r.pinned_seq, r.pinned_text, r.pinned_sender, r.pinned_at, m.cleared_seq, r.picture_id,
               (SELECT u.display_name FROM room_members m2 JOIN users u ON u.id = m2.user_id
                  WHERE m2.room_id = r.id AND m2.user_id <> ?1 LIMIT 1) AS peer_name,
               (SELECT u.picture_url FROM room_members m2 JOIN users u ON u.id = m2.user_id
@@ -425,7 +441,7 @@ function roomOut(r: RoomListRow) {
     id: r.id,
     type: r.type,
     title: r.type === 'dm' ? (r.peer_name ?? 'แชท 1:1') : (r.title ?? (r.type === 'channel' ? 'ชาเนล' : 'กลุ่ม')),
-    picture: r.type === 'dm' ? r.peer_picture : null,
+    picture: r.type === 'dm' ? r.peer_picture : r.picture_id ? pictureUrl(r.picture_id) : null,  // 0011: รูปกลุ่ม/ชาเนล
     lastSeq: r.last_seq,
     lastMessageAt: r.last_message_at,
     lastMessagePreview: r.last_message_preview,
@@ -735,6 +751,57 @@ async function renameRoom(c: Ctx) {
     console.error('แจ้งอัปเดตชื่อห้องให้คนที่เปิดอยู่ไม่สำเร็จ', err);
   }
   return ok({ title, warning });
+}
+
+// ---------- รูปกลุ่ม/ชาเนล (2026-11-18): เจ้าของ/แอดมินห้อง · แจ้งในห้องแบบเงียบเหมือนเปลี่ยนชื่อ ----------
+async function roomPictureAdmin(c: Ctx) {
+  const { room, role } = await requireMember(c.env, c.params.id, c.user!.id);
+  if (room.type === 'dm') throw new ApiError(400, 'DM_NO_PICTURE', 'แชท 1:1 ใช้รูปโปรไฟล์ของอีกฝ่าย ตั้งรูปห้องไม่ได้');
+  const kindTh = room.type === 'channel' ? 'ชาเนล' : 'กลุ่ม';
+  if (role !== 'owner' && role !== 'admin') throw new ApiError(403, 'NOT_ROOM_ADMIN', `เฉพาะเจ้าของ/แอดมิน${kindTh}เท่านั้นที่เปลี่ยนรูปได้`);
+  return { room, kindTh };
+}
+
+/** แจ้งในห้อง + ให้คนที่เปิดห้องอยู่โหลดข้อมูลห้องใหม่ — แจ้งไม่สำเร็จ = คำเตือน (รูปบันทึกแล้ว ไม่ทำให้ล้ม) */
+async function announceRoomChange(c: Ctx, text: string): Promise<string | null> {
+  let warning: string | null = null;
+  try {
+    await postToRoom(c.env, c.params.id, c.user!, { kind: 'text', body: text, extra: { silent: true } });
+  } catch (err) {
+    console.error('แจ้งในห้องไม่สำเร็จ', err);
+    warning = `บันทึกแล้ว แต่แจ้งในห้องไม่สำเร็จ: ${err instanceof ApiError ? err.message : 'ระบบขัดข้อง'}`;
+  }
+  try {
+    await roomStub(c.env, c.params.id).fetch(new Request('https://room/broadcast', { method: 'POST', headers: { 'X-Room-Id': c.params.id } }));
+  } catch (err) {
+    console.error('แจ้งอัปเดตห้องให้คนที่เปิดอยู่ไม่สำเร็จ', err);
+  }
+  return warning;
+}
+
+async function setRoomPicture(c: Ctx) {
+  const { room, kindTh } = await roomPictureAdmin(c);
+  const pic = await readPicture(c.req);
+  const id = await storePicture(c.env, pic);
+  try {
+    await c.env.DB.prepare(`UPDATE rooms SET picture_id = ? WHERE id = ?`).bind(id, c.params.id).run();
+  } catch (err) {
+    console.error('บันทึกรูปห้องลง D1 ไม่สำเร็จ', err);
+    await dropPicture(c.env, id);
+    throw new ApiError(500, 'DB_FAILED', `บันทึกรูป${kindTh}ไม่สำเร็จ กรุณาลองใหม่`);
+  }
+  await dropPicture(c.env, room.picture_id);
+  const warning = await announceRoomChange(c, `🖼 ${c.user!.displayName} เปลี่ยนรูป${kindTh}`);
+  return ok({ picture: pictureUrl(id), warning }, 201);
+}
+
+async function resetRoomPicture(c: Ctx) {
+  const { room, kindTh } = await roomPictureAdmin(c);
+  if (!room.picture_id) throw new ApiError(400, 'NO_ROOM_PICTURE', `${kindTh}นี้ยังไม่มีรูป`);
+  await db(`ลบรูป${kindTh}`, () => c.env.DB.prepare(`UPDATE rooms SET picture_id = NULL WHERE id = ?`).bind(c.params.id).run());
+  await dropPicture(c.env, room.picture_id);
+  const warning = await announceRoomChange(c, `🖼 ${c.user!.displayName} ลบรูป${kindTh}`);
+  return ok({ picture: null, warning });
 }
 
 // ---------- channels ----------
@@ -2256,7 +2323,7 @@ async function requireMember(env: Env, roomId: string, userId: string) {
     env.DB.prepare(
       `SELECT r.id, r.type, r.title, r.last_seq, r.last_message_at, r.last_message_preview, r.last_sender_name,
               r.created_at, r.visibility, r.description, m.last_read_seq, m.role AS my_role, m.muted, m.muted_until,
-              r.pinned_seq, r.pinned_text, r.pinned_sender, r.pinned_at, m.cleared_seq,
+              r.pinned_seq, r.pinned_text, r.pinned_sender, r.pinned_at, m.cleared_seq, r.picture_id,
               (SELECT u.display_name FROM room_members m2 JOIN users u ON u.id = m2.user_id
                  WHERE m2.room_id = r.id AND m2.user_id <> ?2 LIMIT 1) AS peer_name,
               (SELECT u.picture_url FROM room_members m2 JOIN users u ON u.id = m2.user_id

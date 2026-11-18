@@ -13,6 +13,7 @@ import LoginPage from './pages/LoginPage';
 import PendingPage from './pages/PendingPage';
 import AppShell, { HomeRoute } from './AppShell';
 import MenuPage from './pages/MenuPage';
+import ProfilePage from './pages/ProfilePage';
 import NewChatPage from './pages/NewChatPage';
 import ChatRoomPage from './pages/ChatRoomPage';
 import AdminPage from './pages/AdminPage';
@@ -122,6 +123,7 @@ function App() {
           <Route element={<AppShell />}>
           <Route index element={<HomeRoute />} />
           <Route path="menu" element={<MenuPage />} />
+          <Route path="profile" element={<ProfilePage />} />
           <Route path="new" element={<NewChatPage />} />
           <Route path="room/:id" element={<ChatRoomPage />} />
           <Route path="channels" element={<ChannelsPage />} />

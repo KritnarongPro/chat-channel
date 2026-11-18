@@ -407,3 +407,18 @@ html.chat-open .route-view { height: 100%; min-height: 0; }  /* หน้าแ�
 .reaction-chips { min-height: 32px; align-items: center; }
 .reaction-chips span { padding: 2px 9px; }
 .setup-bar-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- โปรไฟล์: รูป + ชื่อ · ตัวครอปวงกลม · รูปกลุ่ม (2026-11-18) ---------- */
+.menu-profile .link-ish { color: var(--blue); font-size: 14px; white-space: nowrap; }
+.profile-hero { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 24px 14px 12px; }
+.profile-pic { position: relative; border: 0; background: none; padding: 0; border-radius: 50%; cursor: pointer; }
+.profile-pic-cam { position: absolute; right: 0; bottom: 0; width: 36px; height: 36px; border-radius: 50%; background: var(--surface); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 18px; box-shadow: 0 1px 4px rgba(0,0,0,.15); }
+.cropper { align-items: center; }
+.cropper .sheet-head { align-self: stretch; }
+.crop-view { position: relative; overflow: hidden; border-radius: 16px; background: #111; touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; flex: none; }
+.crop-view img { position: absolute; left: 0; top: 0; max-width: none; pointer-events: none; }
+.crop-mask { position: absolute; inset: 0; border-radius: 50%; box-shadow: 0 0 0 999px rgba(0,0,0,.55); pointer-events: none; outline: 2px solid rgba(255,255,255,.85); outline-offset: -2px; }
+.crop-zoom { display: flex; align-items: center; gap: 10px; width: 280px; }
+.crop-zoom input { flex: 1; padding: 0; min-height: 44px; border: 0; background: none; }
+.center-text { text-align: center; margin: 0; }
+.room-pic-row { display: flex; align-items: center; gap: 12px; padding: 4px 4px 8px; }

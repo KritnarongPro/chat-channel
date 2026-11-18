@@ -19,6 +19,14 @@ export const MAX_VOICE_SECONDS = 300;
 export const IMAGE_MAX_SIDE = 1600;
 /** ชนิดรูปที่รับ (ไม่รับ SVG เพราะฝังสคริปต์ได้) */
 export const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+
+// ---------- รูปโปรไฟล์ / รูปกลุ่ม / ชื่อที่แสดง (2026-11-18) ----------
+/** หน้าเว็บครอปเป็นสี่เหลี่ยมจัตุรัสด้านละ PICTURE_SIDE px แล้วส่งเป็น JPEG · ไม่รับ GIF/SVG (BUGS-04) */
+export const PICTURE_MIMES = ['image/jpeg', 'image/png', 'image/webp'];
+export const PICTURE_SIDE = 256;
+export const PICTURE_MAX_BYTES = 300 * 1024;
+export const PROFILE_NAME_MIN = 2;
+export const PROFILE_NAME_MAX = 40;
 /** ชนิดเสียงที่รับ (ตัด ;codecs=... ออกก่อนเทียบ) */
 export const VOICE_MIMES = ['audio/mp4', 'audio/webm', 'audio/ogg', 'audio/mpeg', 'audio/aac'];
 /** ชนิดวิดีโอที่รับ — .mov จาก iPhone (HEVC) Android บางรุ่นเล่นไม่ได้ → หน้าเว็บแสดงปุ่มดาวน์โหลดแทน */

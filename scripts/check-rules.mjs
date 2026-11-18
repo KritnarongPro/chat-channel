@@ -328,10 +328,28 @@ for (const f of walk('src', ['.css'])) {
   if (!/html\.chat-open \.route-view \{ height: 100%/.test(css)) fail('BUGS-22', 'styles.css ต้องมี html.chat-open .route-view { height: 100% } (ไม่งั้นหน้าแชทบนมือถือยืดตามข้อความ ช่องพิมพ์หลุดจอ)');
 }
 
+// ---------- BUGS-23 ชื่อ/รูปที่ผู้ใช้ตั้งเองห้ามถูกล็อกอินเขียนทับ + ไฟล์รูปโปรไฟล์ต้องปลอดภัย (กันไว้ก่อน — 2026-11-18) ----------
+{
+  for (const f of ['auth-google.ts', 'auth-line.ts']) {
+    const src = read(join('worker', f));
+    const updates = src.match(/UPDATE users SET[\s\S]*?`/g) ?? [];
+    for (const u of updates) {
+      if (/display_name\s*=/.test(u) && !/name_custom/.test(u)) fail('BUGS-23', `worker/${f}: UPDATE users ที่เขียน display_name ต้องเช็ก name_custom (ไม่งั้นล็อกอินแล้วชื่อที่ผู้ใช้ตั้งเองหาย)`);
+      if (/picture_url\s*=/.test(u) && !/picture_id/.test(u)) fail('BUGS-23', `worker/${f}: UPDATE users ที่เขียน picture_url ต้องเช็ก picture_id (ไม่งั้นล็อกอินแล้วรูปที่ผู้ใช้อัปหาย)`);
+    }
+  }
+  const prof = read(join('worker', 'profile.ts'));
+  if (!/'X-Content-Type-Options': 'nosniff'/.test(prof)) fail('BUGS-23', 'servePicture (worker/profile.ts) ต้องตั้ง X-Content-Type-Options: nosniff');
+  if (!/const real = sniffImage\(bytes\)/.test(prof)) fail('BUGS-23', 'readPicture ต้องตรวจหัวไฟล์จริงด้วย sniffImage (ไม่เชื่อ Content-Type อย่างเดียว)');
+  const proto = read(join('shared', 'protocol.ts'));
+  const pm = proto.match(/PICTURE_MIMES = \[([^\]]*)\]/);
+  if (!pm || /svg|gif/i.test(pm[1])) fail('BUGS-23', 'PICTURE_MIMES ต้องมีแค่ jpeg/png/webp (ห้าม SVG — ดู BUGS-04)');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..22)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..23)');

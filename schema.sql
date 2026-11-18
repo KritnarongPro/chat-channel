@@ -1,7 +1,7 @@
 -- =====================================================================
 -- schema.sql — โครงฐานข้อมูล D1 ปัจจุบันทั้งหมด (รวมทุก migration) ใช้อ่านอ้างอิง
 -- แก้โครงตาราง → เพิ่มไฟล์ใหม่ใน migrations/ แล้วอัปเดตไฟล์นี้ให้ตรงกัน (check:rules ตรวจให้)
--- ล่าสุดถึง: 0010_chat_more.sql
+-- ล่าสุดถึง: 0011_profile.sql
 -- =====================================================================
 
 -- ---------- ผู้ใช้ (ล็อกอินด้วย LINE) ----------
@@ -16,6 +16,10 @@ CREATE TABLE users (
   is_bot        INTEGER NOT NULL DEFAULT 0,  -- 0004: 1 = บอท (line_user_id = 'bot:<id>')
   google_sub    TEXT,                        -- 0008: รหัสบัญชี Google (ผูกแล้ว) · สมัครด้วย Google อย่างเดียว → line_user_id = 'google:<sub>'
   email         TEXT,                        -- 0008: อีเมลที่ Google ยืนยันแล้ว
+  oauth_name    TEXT,                        -- 0011: ชื่อล่าสุดจาก Gmail/LINE (ปุ่ม "กลับไปใช้ชื่อจาก Gmail")
+  oauth_picture TEXT,                        -- 0011: รูปล่าสุดจาก Gmail/LINE
+  name_custom   INTEGER NOT NULL DEFAULT 0,  -- 0011: 1 = ผู้ใช้ตั้งชื่อเอง → ล็อกอินห้ามทับ display_name
+  picture_id    TEXT,                        -- 0011: รูปที่ผู้ใช้อัปเอง (R2 pictures/<id>) → ล็อกอินห้ามทับ picture_url
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );
@@ -52,7 +56,8 @@ CREATE TABLE rooms (
   pinned_text           TEXT,     -- 0006: ข้อความย่อของโพสต์ที่ปักหมุด
   pinned_sender         TEXT,     -- 0006
   pinned_by             TEXT,     -- 0006: ใครปักหมุด (users.id)
-  pinned_at             TEXT      -- 0006
+  pinned_at             TEXT,     -- 0006
+  picture_id            TEXT      -- 0011: รูปกลุ่ม/ชาเนล (R2 pictures/<id>) · แชท 1:1 ใช้รูปของอีกฝ่าย
 );
 CREATE INDEX idx_rooms_type_visibility ON rooms(type, visibility);
 
