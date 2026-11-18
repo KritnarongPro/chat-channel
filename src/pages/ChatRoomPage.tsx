@@ -30,6 +30,7 @@ import Loading from '../Loading';
 import { lockChatViewport } from '../viewport';
 import { useSwipeReply } from '../gestures';
 import PictureCropper from '../PictureCropper';
+import { MuteSheet, RoomMenu } from '../RoomActions';  // 2026-11-18: ใช้ร่วมกับหน้ารายการแชท
 import VoiceRecorder from '../VoiceRecorder';
 import InvitePanel from '../InvitePanel';
 import { formatDuration, formatSize, prepareImage, prepareVideo } from '../media';
@@ -807,125 +808,6 @@ function CopyPartSheet({ m, onClose }: { m: ChatMessage; onClose: () => void }) 
         <p className="small muted">ลากเลือกเฉพาะส่วนที่ต้องการ แล้วกด "คัดลอกส่วนที่เลือก"</p>
         <textarea ref={ref} readOnly value={m.body} rows={Math.min(12, Math.max(3, m.body.split('\n').length + 1))} className="copy-part" />
         <button className="btn btn-block" onClick={() => void copySelected()}>คัดลอกส่วนที่เลือก</button>
-      </div>
-    </div>
-  );
-}
-
-const MUTE_OPTIONS: { key: '1h' | '8h' | '2d' | 'forever'; label: string }[] = [
-  { key: '1h', label: '1 ชั่วโมง' }, { key: '8h', label: '8 ชั่วโมง' }, { key: '2d', label: '2 วัน' }, { key: 'forever', label: 'ตลอดไป' },
-];
-
-function MuteSheet({ room, onClose, onSaved }: {
-  room: Room; onClose: () => void; onSaved: (muted: boolean, mutedUntil: string | null) => void;
-}) {
-  const notify = useNotify();
-  const [busy, setBusy] = useState(false);
-  async function save(body: { muted: boolean; for?: string }) {
-    setBusy(true);
-    try {
-      const r = await api.post<{ muted: boolean; mutedUntil: string | null }>(`/api/rooms/${encodeURIComponent(room.id)}/mute`, body);
-      onSaved(r.muted, r.mutedUntil);
-      notify('success', !r.muted ? 'เปิดแจ้งเตือนห้องนี้แล้ว'
-        : r.mutedUntil ? `ปิดเสียงถึง ${thaiDate(r.mutedUntil)} ${thaiClock(r.mutedUntil)} น.` : 'ปิดเสียงห้องนี้ตลอดไปแล้ว');
-      onClose();
-    } catch (e) {
-      notify('error', `ตั้งค่าแจ้งเตือนไม่สำเร็จ: ${errMsg(e)}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-  return (
-    <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="sheet-head"><b>แจ้งเตือนห้องนี้</b><button className="link" onClick={onClose}>ปิด</button></div>
-        <p className="small">
-          ตอนนี้: <b>{!room.muted ? 'เปิดอยู่ 🔔'
-            : room.mutedUntil ? `ปิดเสียงถึง ${thaiDate(room.mutedUntil)} ${thaiClock(room.mutedUntil)} น.` : 'ปิดเสียงตลอด 🔕'}</b>
-        </p>
-        {room.muted && <button className="btn btn-block" disabled={busy} onClick={() => void save({ muted: false })}>🔔 เปิดแจ้งเตือน</button>}
-        <p className="small muted">ปิดเสียงเป็นเวลา:</p>
-        {MUTE_OPTIONS.map((o) => (
-          <button key={o.key} className="btn btn-ghost btn-block" disabled={busy} onClick={() => void save({ muted: true, for: o.key })}>🔕 {o.label}</button>
-        ))}
-        <p className="small muted">ปิดเสียงแล้วถ้ามีคน @ชื่อคุณ หรือตอบกลับข้อความคุณ ยังเด้งอยู่ (ปิดได้ที่หน้า ตั้งค่าแจ้งเตือน)</p>
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------
-// เมนูห้อง (⋯): ลบแชทฝั่งฉัน · ออกจากกลุ่ม (เจ้าของต้องเลือกคนรับต่อ)
-// ---------------------------------------------------------------------
-function RoomMenu({ room, members, onClose }: { room: Room; members: RoomMember[]; onClose: () => void }) {
-  const notify = useNotify();
-  const nav = useNavigate();
-  const { me } = useMe();
-  const [busy, setBusy] = useState(false);
-  const [picking, setPicking] = useState(false);
-  const isOwner = room.myRole === 'owner';
-  const heirs = members.filter((m) => m.id !== me.user.id && !m.isBot);
-
-  async function clear() {
-    if (!confirm('ลบแชทนี้ฝั่งคุณ? ประวัติข้อความจะหายจากเครื่องคุณ และห้องจะหายจากรายการ (คนอื่นยังเห็นครบ) — มีข้อความใหม่ห้องจะกลับมาเอง')) return;
-    setBusy(true);
-    try {
-      await api.post(`/api/rooms/${encodeURIComponent(room.id)}/clear`);
-      notify('success', 'ลบแชทแล้ว');
-      nav('/', { replace: true });
-    } catch (e) {
-      notify('error', `ลบแชทไม่สำเร็จ: ${errMsg(e)}`);
-      setBusy(false);
-    }
-  }
-
-  async function leave(transferTo?: string) {
-    const heir = transferTo ? heirs.find((h) => h.id === transferTo)?.displayName : null;
-    if (!confirm(heir ? `โอนเจ้าของกลุ่มให้ ${heir} แล้วออกจากกลุ่ม?` : `ออกจากกลุ่ม "${room.title}"? ต้องให้คนในกลุ่มเพิ่มกลับหรือใช้ลิงก์เชิญถึงจะเข้าได้อีก`)) return;
-    setBusy(true);
-    try {
-      const r = await api.post<{ warning: string | null }>(`/api/rooms/${encodeURIComponent(room.id)}/leave`, transferTo ? { transferTo } : {});
-      notify('success', 'ออกจากกลุ่มแล้ว');
-      if (r.warning) notify('warning', r.warning);
-      nav('/', { replace: true });
-    } catch (e) {
-      notify('error', `ออกจากกลุ่มไม่สำเร็จ: ${errMsg(e)}`);
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="sheet-backdrop" onClick={onClose}>
-      <div className="sheet" onClick={(e) => e.stopPropagation()}>
-        <div className="sheet-head"><b className="ellipsis">{room.title}</b><button className="link" onClick={onClose}>ปิด</button></div>
-        {!picking ? (
-          <ul className="menu-list">
-            <li><Link to={`/room/${encodeURIComponent(room.id)}/notes`}>📝 โน้ตของห้องนี้</Link></li>
-            <li><button disabled={busy} onClick={() => void clear()}>🧹 ลบแชท (เฉพาะฝั่งฉัน)</button></li>
-            {room.type === 'group' && (
-              <li>
-                <button className="danger-text" disabled={busy}
-                  onClick={() => (isOwner && heirs.length > 0 ? setPicking(true) : void leave())}>
-                  🚪 ออกจากกลุ่ม
-                </button>
-              </li>
-            )}
-          </ul>
-        ) : (
-          <>
-            <p className="small">คุณเป็นเจ้าของกลุ่ม — เลือกคนรับเป็นเจ้าของต่อก่อนออก</p>
-            <ul className="user-list">
-              {heirs.map((h) => (
-                <li key={h.id} className="user-item">
-                  <Avatar name={h.displayName} url={h.pictureUrl} size={32} />
-                  <span className="grow">{h.displayName}{h.role === 'admin' ? <span className="small muted"> · แอดมิน</span> : null}</span>
-                  <button className="btn btn-small" disabled={busy} onClick={() => void leave(h.id)}>โอนแล้วออก</button>
-                </li>
-              ))}
-            </ul>
-            <button className="btn btn-ghost btn-block" disabled={busy} onClick={() => setPicking(false)}>ยกเลิก</button>
-          </>
-        )}
       </div>
     </div>
   );

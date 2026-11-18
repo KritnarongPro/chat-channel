@@ -429,6 +429,25 @@ export class ChatRoom extends DurableObject<Env> {
       return json({ ok: true, data: { message: updated, by, fileId: row.file_id, wasLast: last === seq } });
     }
 
+    // ---------- อ่านแล้วทั้งหมด (2026-11-18 — กดค้างที่หน้ารายการแชท) ----------
+    // ทำในห้องนี้ ไม่ใช่ที่ worker ตรง ๆ → คนที่เปิดห้องอยู่เห็น "อ่านแล้ว" อัปเดตทันที (broadcastRead กรองสิทธิ์เหมือนอ่านในห้อง)
+    if (url.pathname === '/read-all' && req.method === 'POST') {
+      const userId = req.headers.get('X-User-Id');
+      if (!userId || !roomId) return json({ ok: false, error: { code: 'BAD_REQUEST', message: 'ข้อมูลไม่ครบ (ไม่ทราบผู้ใช้/ห้อง)' } }, 400);
+      try {
+        const r = await this.env.DB.prepare(
+          `UPDATE room_members SET last_read_seq = (SELECT last_seq FROM rooms WHERE id = ?1)
+           WHERE room_id = ?1 AND user_id = ?2 AND last_read_seq < (SELECT last_seq FROM rooms WHERE id = ?1)
+           RETURNING last_read_seq`,
+        ).bind(roomId, userId).first<{ last_read_seq: number }>();
+        if (r) this.broadcastRead(userId, r.last_read_seq);
+        return json({ ok: true, data: { seq: r?.last_read_seq ?? null } });
+      } catch (err) {
+        console.error('อ่านแล้วทั้งหมดไม่สำเร็จ', err);
+        return json({ ok: false, error: { code: 'DB_FAILED', message: 'บันทึกสถานะอ่านแล้วไม่สำเร็จ กรุณาลองใหม่' } }, 500);
+      }
+    }
+
     // ---------- บอกทุกคนที่เปิดห้องอยู่ว่าข้อมูลห้องเปลี่ยน (เช่น ปักหมุด) ----------
     if (url.pathname === '/broadcast' && req.method === 'POST') {
       this.broadcast({ type: 'room_update' });

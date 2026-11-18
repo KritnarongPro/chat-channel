@@ -346,10 +346,18 @@ for (const f of walk('src', ['.css'])) {
   if (!pm || /svg|gif/i.test(pm[1])) fail('BUGS-23', 'PICTURE_MIMES ต้องมีแค่ jpeg/png/webp (ห้าม SVG — ดู BUGS-04)');
 }
 
+// ---------- BUGS-24 ลบแชทที่ยังไม่มีข้อความต้องหายจากรายการจริง (เจอ 2026-11-18 ตอนทดสอบลบจากหน้ารายการแชท) ----------
+{
+  const idx = read(join('worker', 'index.ts'));
+  if (!/CASE WHEN last_seq = 0 THEN -1 ELSE last_seq END/.test(idx)) fail('BUGS-24', 'clearChat ต้องเก็บ cleared_seq = -1 เมื่อห้องยังไม่มีข้อความ (ไม่งั้นลบแล้วห้องไม่หาย แต่ขึ้นว่าลบแล้ว)');
+  if (!/m\.cleared_seq <> 0 AND r\.last_seq <= MAX\(m\.cleared_seq, 0\)/.test(idx)) fail('BUGS-24', 'listRooms ต้องซ่อนห้องด้วย m.cleared_seq <> 0 AND r.last_seq <= MAX(m.cleared_seq, 0)');
+  if (idx.split('\n').some((l) => /room\.cleared_seq \?\? 0/.test(l) && !l.includes('const clearedOf'))) fail('BUGS-24', 'ใช้ clearedOf(room) แทน room.cleared_seq ?? 0 (ค่า -1 ต้องถือเป็น 0 ตอนกรองข้อความ)');
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..23)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..24)');

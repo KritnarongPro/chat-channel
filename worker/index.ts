@@ -96,6 +96,7 @@ const routes: Route[] = [
   { method: 'GET',  pattern: '/api/rooms/:id',                need: 'active', handler: getRoom },
   { method: 'POST', pattern: '/api/rooms/:id/members',        need: 'active', handler: addMembers },
   { method: 'POST', pattern: '/api/rooms/:id/mute',           need: 'active', handler: setMute },
+  { method: 'POST', pattern: '/api/rooms/:id/read',           need: 'active', handler: markRoomRead },  // อ่านแล้วทั้งหมด (หน้ารายการแชท)
   { method: 'POST', pattern: '/api/rooms/:id/pin',            need: 'active', handler: pinMessage },    // ปักหมุด/ประกาศ (สูงสุด 5)
   { method: 'POST', pattern: '/api/rooms/:id/unpin',          need: 'active', handler: unpinMessage },
   { method: 'POST', pattern: '/api/rooms/:id/title',          need: 'active', handler: renameRoom },
@@ -429,7 +430,7 @@ async function listRooms(c: Ctx) {
                  WHERE m2.room_id = r.id AND m2.user_id <> ?1 LIMIT 1) AS peer_picture
        FROM room_members m JOIN rooms r ON r.id = m.room_id
        WHERE m.user_id = ?1
-         AND NOT (m.cleared_seq > 0 AND r.last_seq <= m.cleared_seq)  -- ลบแชทออกจากรายการแล้ว และยังไม่มีข้อความใหม่
+         AND NOT (m.cleared_seq <> 0 AND r.last_seq <= MAX(m.cleared_seq, 0))  -- ลบแชทแล้ว และยังไม่มีข้อความใหม่ (-1 = ลบตอนห้องยังว่าง — BUGS-24)
        ORDER BY COALESCE(r.last_message_at, r.created_at) DESC`,
     ).bind(c.user!.id).all<RoomListRow>(),
   );
@@ -987,17 +988,38 @@ async function deleteMessage(c: Ctx) {
 }
 
 /** ลบแชทฝั่งฉัน: ล้างประวัติ + เอาออกจากรายการ (อีกฝ่ายยังเห็นครบ) · มีข้อความใหม่ห้องกลับมาเอง */
+/** ล้างแชทฝั่งฉันถึงลำดับไหน — -1 (ลบตอนห้องยังว่าง) ถือเป็น 0 ทุกจุดที่ใช้กรองข้อความ */
+const clearedOf = (room: { cleared_seq: number | null }) => Math.max(0, room.cleared_seq ?? 0);
+
 async function clearChat(c: Ctx) {
   await requireMember(c.env, c.params.id, c.user!.id);
   const r = await db('ลบแชทฝั่งฉัน', () =>
     c.env.DB.prepare(
-      `UPDATE room_members SET cleared_seq = (SELECT last_seq FROM rooms WHERE id = ?1),
+      // ห้องที่ยังไม่มีข้อความ (last_seq = 0) เก็บ -1 แทน 0 — ไม่งั้นรายการแชทแยกไม่ออกว่าลบแล้ว ห้องไม่หาย (BUGS-24)
+      `UPDATE room_members SET cleared_seq = (SELECT CASE WHEN last_seq = 0 THEN -1 ELSE last_seq END FROM rooms WHERE id = ?1),
                                last_read_seq = (SELECT last_seq FROM rooms WHERE id = ?1)
        WHERE room_id = ?1 AND user_id = ?2`,
     ).bind(c.params.id, c.user!.id).run(),
   );
   if (r.meta.changes !== 1) throw new ApiError(404, 'NOT_MEMBER', 'คุณไม่ได้เป็นสมาชิกห้องนี้');
   return ok({ cleared: true });
+}
+
+/** อ่านแล้วทั้งหมด (2026-11-18 — กดค้างที่หน้ารายการแชท) · ส่งให้ห้อง (Durable Object) ทำ เพื่อกระจาย "อ่านแล้ว" ให้คนที่เปิดห้องอยู่ */
+async function markRoomRead(c: Ctx) {
+  await requireMember(c.env, c.params.id, c.user!.id);
+  let res: Response;
+  try {
+    res = await roomStub(c.env, c.params.id).fetch(new Request('https://room/read-all', {
+      method: 'POST', headers: { 'X-Room-Id': c.params.id, 'X-User-Id': c.user!.id },
+    }));
+  } catch (err) {
+    console.error('ติดต่อห้องแชทไม่สำเร็จ (อ่านแล้วทั้งหมด)', err);
+    throw new ApiError(502, 'ROOM_UNAVAILABLE', 'ติดต่อห้องแชทไม่ได้ กรุณาลองใหม่');
+  }
+  const j = (await res.json()) as { ok: boolean; data?: { seq: number | null }; error?: { code: string; message: string } };
+  if (!j.ok) throw new ApiError(res.status, j.error?.code ?? 'READ_FAILED', j.error?.message ?? 'บันทึกสถานะอ่านแล้วไม่สำเร็จ');
+  return ok({ seq: j.data?.seq ?? null });
 }
 
 /** เจ้าของชาเนล/กลุ่ม ตั้งหรือถอดแอดมินของห้อง */
@@ -1022,7 +1044,7 @@ async function history(c: Ctx) {
   const before = c.url.searchParams.get('before') ?? '';
   const limit = c.url.searchParams.get('limit') ?? String(HISTORY_LIMIT);
   const stub = roomStub(c.env, c.params.id);
-  const after = room.cleared_seq ?? 0; // ล้างแชทฝั่งฉันแล้ว → ไม่ส่งข้อความก่อนจุดนั้น
+  const after = clearedOf(room); // ล้างแชทฝั่งฉันแล้ว → ไม่ส่งข้อความก่อนจุดนั้น
   return stub.fetch(new Request(`https://room/history?before=${encodeURIComponent(before)}&limit=${encodeURIComponent(limit)}&after=${after}`, {
     headers: { 'X-Room-Id': c.params.id, 'X-User-Id': c.user!.id },  // X-User-Id: กรองข้อความที่ลบเฉพาะฝั่งฉัน
   }));
@@ -1039,7 +1061,7 @@ async function openSocket(c: Ctx) {
       Upgrade: 'websocket',
       'X-Room-Id': c.params.id,
       'X-User-Id': c.user!.id,
-      'X-Cleared-Seq': String(room.cleared_seq ?? 0),
+      'X-Cleared-Seq': String(clearedOf(room)),
       'X-User-Name': encodeURIComponent(c.user!.displayName),
       // อ่านแล้ว: ชาเนลส่งสถานะอ่านให้เฉพาะเจ้าของ/แอดมิน
       'X-Room-Role': room.my_role,
@@ -1054,7 +1076,7 @@ async function searchMessages(c: Ctx) {
   const { room } = await requireMember(c.env, c.params.id, c.user!.id);
   const q = (c.url.searchParams.get('q') ?? '').trim();
   if (q.length < 1 || q.length > 100) throw new ApiError(400, 'BAD_QUERY', 'คำค้นต้องยาว 1–100 ตัวอักษร');
-  const after = room.cleared_seq ?? 0;
+  const after = clearedOf(room);
   return roomStub(c.env, c.params.id).fetch(new Request(`https://room/search?q=${encodeURIComponent(q)}&after=${after}`, {
     headers: { 'X-Room-Id': c.params.id, 'X-User-Id': c.user!.id },  // X-User-Id: ไม่ค้นข้อความที่ลบเฉพาะฝั่งฉัน
   }));
@@ -1075,7 +1097,7 @@ async function forwardMessage(c: Ctx) {
   const { room } = await requireMember(c.env, c.params.id, c.user!.id);
   const seq = Number(c.params.seq);
   if (!Number.isInteger(seq) || seq < 1) throw new ApiError(400, 'BAD_SEQ', 'ระบุข้อความที่จะส่งต่อไม่ถูกต้อง');
-  if (seq <= (room.cleared_seq ?? 0)) throw new ApiError(404, 'MESSAGE_NOT_FOUND', 'ไม่พบข้อความนี้ในห้อง');
+  if (seq <= clearedOf(room)) throw new ApiError(404, 'MESSAGE_NOT_FOUND', 'ไม่พบข้อความนี้ในห้อง');
   const body = await readJson<{ targets?: unknown }>(c.req);
   const targets = Array.isArray(body.targets) ? [...new Set(body.targets.filter((t): t is string => typeof t === 'string' && t.length > 0))] : [];
   if (targets.length === 0) throw new ApiError(400, 'NO_TARGETS', 'เลือกห้องที่จะส่งต่ออย่างน้อย 1 ห้อง');
