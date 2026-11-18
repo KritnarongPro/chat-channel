@@ -87,6 +87,21 @@ export default function ChatRoomPage() {
   // ---------- ลิงก์ของกลุ่ม (2026-11-18): แถบลิงก์ด่วน = ลิงก์ที่ปักไว้ · ซ่อนแถบได้ (จำในเครื่อง) ----------
   const [links, setLinks] = useState<RoomLink[]>([]);
   const [linksBarHidden, setLinksBarHidden] = useState(() => readFlag(`links-bar-hidden:${id}`));
+  // ปุ่ม "ทั้งหมด" ขึ้นเฉพาะตอนลิงก์ที่ปักล้นความกว้างแถบ (ผู้ใช้ขอ 2026-11-18) — ยังมีที่ว่าง = ไม่แสดง
+  //   (หน้ารวมลิงก์ยังเข้าได้เสมอจาก ⋯ → ลิงก์ของกลุ่ม) · วัดความกว้างจริงด้วย ResizeObserver (หมุนจอ / iPad 2 ช่อง)
+  const pinnedLinks = links.filter((l) => l.pinned);
+  const [linksBarW, setLinksBarW] = useState(0);
+  const barObserver = useRef<ResizeObserver | null>(null);
+  const linksBarRef = useCallback((el: HTMLElement | null) => {
+    barObserver.current?.disconnect();
+    if (!el) return;
+    setLinksBarW(el.clientWidth);
+    barObserver.current = new ResizeObserver(() => setLinksBarW(el.clientWidth));
+    barObserver.current.observe(el);
+  }, []);
+  useEffect(() => () => barObserver.current?.disconnect(), []);
+  const LINK_ITEM_W = 64, LINK_GAP = 4, LINKS_BAR_PAD = 16;  // ต้องตรงกับ .links-bar / .links-bar-item ใน styles.css
+  const linksOverflow = linksBarW > 0 && pinnedLinks.length * LINK_ITEM_W + (pinnedLinks.length - 1) * LINK_GAP + LINKS_BAR_PAD > linksBarW;
   function toggleLinksBar() {
     const next = !linksBarHidden;
     setLinksBarHidden(next);
@@ -371,18 +386,20 @@ export default function ChatRoomPage() {
         )}
       />
       {connText && <div className={`banner ${s.conn === 'failed' ? 'banner-error' : 'banner-warning'}`} role="status">{connText}</div>}
-      {!linksBarHidden && links.some((l) => l.pinned) && (
-        <nav className="links-bar" aria-label="ลิงก์ด่วนของกลุ่ม">
-          {links.filter((l) => l.pinned).map((l) => (
+      {!linksBarHidden && pinnedLinks.length > 0 && (
+        <nav className="links-bar" aria-label="ลิงก์ด่วนของกลุ่ม" ref={linksBarRef}>
+          {pinnedLinks.map((l) => (
             <a key={l.id} href={l.url} target="_blank" rel="noopener noreferrer" className="links-bar-item" title={l.title}>
               <LinkIcon icon={l.icon} title={l.title} size={40} />
               <span>{l.title}</span>
             </a>
           ))}
-          <Link to={`/room/${encodeURIComponent(id)}/links`} className="links-bar-item" aria-label={`ลิงก์ทั้งหมด ${links.length} อัน`}>
-            <span className="link-icon links-bar-all" style={{ width: 40, height: 40 }} aria-hidden="true">⋯</span>
-            <span>ทั้งหมด {links.length}</span>
-          </Link>
+          {linksOverflow && (
+            <Link to={`/room/${encodeURIComponent(id)}/links`} className="links-bar-item" aria-label={`ลิงก์ทั้งหมด ${links.length} อัน`}>
+              <span className="link-icon links-bar-all" style={{ width: 40, height: 40 }} aria-hidden="true">⋯</span>
+              <span>ทั้งหมด {links.length}</span>
+            </Link>
+          )}
         </nav>
       )}
       {pins.length > 0 && (
