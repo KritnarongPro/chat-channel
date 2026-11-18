@@ -6,6 +6,7 @@
 
 import { LOGIN_ERRORS } from '../api';
 import { escapeInAppBrowser } from '../pwa';
+import { BrandLogo } from '../components';
 
 export default function LoginPage() {
   const code = new URLSearchParams(location.search).get('login_error');
@@ -14,7 +15,7 @@ export default function LoginPage() {
 
   return (
     <div className="center login">
-      <h1>แชทส่วนตัว</h1>
+      <BrandLogo />
       <p className="muted">แชท กลุ่ม และชาเนลสำหรับกลุ่มของเรา</p>
       {reason && <p className="error-text" role="alert">{reason}</p>}
       {blocked ? (

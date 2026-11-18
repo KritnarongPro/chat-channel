@@ -79,7 +79,7 @@ export default function InvitePanel({ roomId, roomTitle }: { roomId: string; roo
     }
   }
 
-  const shareText = (url: string) => `เชิญเข้าร่วม "${roomTitle}" ในแชทส่วนตัว\n${url}`;
+  const shareText = (url: string) => `เชิญเข้าร่วม "${roomTitle}" ใน VELA CHAT\n${url}`;
 
   return (
     <div className="invite-panel">

@@ -17,7 +17,7 @@
   // ---------- ค่าที่ไม่ใช่ความลับ ----------
   "vars": {
     "APP_URL": "https://noti.kalon-ai.app",
-    "APP_NAME": "แชทส่วนตัว"
+    "APP_NAME": "VELA CHAT"
   },
   // ความลับ (ตั้งใน Dashboard → Workers → chat-channel → Settings → Variables and Secrets):
   //   LINE_CHANNEL_ID, LINE_CHANNEL_SECRET, SETUP_TOKEN

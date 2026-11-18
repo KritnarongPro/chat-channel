@@ -1,4 +1,4 @@
-# chat-channel — แชทส่วนตัว
+# chat-channel — VELA CHAT
 
 แชท 1:1 / กลุ่ม / ชาเนล + บอท สำหรับกลุ่มของเรา บน Cloudflare (Workers + Durable Objects + D1 + R2)
 เว็บ: https://noti.kalon-ai.app
