@@ -377,10 +377,18 @@ for (const f of walk('src', ['.css'])) {
   }
 }
 
+// ---------- BUGS-26 เปลี่ยนห้องแล้วข้อมูลห้องเก่าค้าง + ข้อความที่พิมพ์ค้างตามไปห้องใหม่ (เจอ 2026-11-18) ----------
+{
+  const main = read(join('src', 'main.tsx'));
+  if (!/<Route path="room\/:id" element=\{<ChatRoomRoute \/>\}/.test(main) || !/<ChatRoomPage key=\{id\} \/>/.test(main)) {
+    fail('BUGS-26', 'main.tsx: เส้น room/:id ต้องใช้ ChatRoomRoute ที่ใส่ <ChatRoomPage key={id} /> (ไม่งั้นย้ายห้องแล้วลิงก์/ชื่อ/ข้อความร่างของห้องเก่าค้าง)');
+  }
+}
+
 // ---------- สรุป ----------
 if (failures.length) {
   console.error(failures.join('\n'));
   console.error(`\nไม่ผ่าน ${failures.length} ข้อ — ดูรายละเอียดใน CHEATSHEET-CORE.md / CHEATSHEET-BUGS.md`);
   process.exit(1);
 }
-console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..25)');
+console.log('✓ ผ่านกฎทุกข้อ (CORE-01..08, BUGS-01..26)');

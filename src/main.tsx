@@ -5,7 +5,7 @@
 
 import { StrictMode, useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router';
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useParams } from 'react-router';
 import { ApiError, Me, api, errMsg } from './api';
 import { NoticeProvider } from './notice';
 import { MeContext } from './me';
@@ -51,6 +51,16 @@ function PrefsLoader() {
       .catch((e) => notify('warning', `โหลดธีม/ขนาดตัวอักษรจากบัญชีไม่สำเร็จ ใช้ค่าในเครื่องแทน: ${errMsg(e)}`));
   }, [notify]);
   return null;
+}
+
+/**
+ * ห้องแชท: สร้างหน้าใหม่ทุกครั้งที่เปลี่ยนห้อง (key = ไอดีห้อง) — BUGS-26 (เจอ 2026-11-18)
+ * ถ้าใช้ตัวเดิมซ้ำ ข้อมูลห้องเก่า (ชื่อ / ลิงก์ / ประกาศ / ข้อความที่พิมพ์ค้าง) ค้างอยู่ตอนย้ายห้อง
+ * — ข้อความที่พิมพ์ค้างตามไปห้องใหม่ถาวร เสี่ยงส่งผิดกลุ่ม
+ */
+function ChatRoomRoute() {
+  const { id = '' } = useParams();
+  return <ChatRoomPage key={id} />;
 }
 
 function App() {
@@ -126,7 +136,7 @@ function App() {
           <Route path="menu" element={<MenuPage />} />
           <Route path="profile" element={<ProfilePage />} />
           <Route path="new" element={<NewChatPage />} />
-          <Route path="room/:id" element={<ChatRoomPage />} />
+          <Route path="room/:id" element={<ChatRoomRoute />} />
           <Route path="channels" element={<ChannelsPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="form/:formId" element={<FormFillPage />} />
